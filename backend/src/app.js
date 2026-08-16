@@ -11,7 +11,6 @@ const monRoutes = require('./routes/monRoutes');
 const payrollRoutes = require("./routes/payrollRoutes");
 const donHangRoutes = require("./routes/donHangRoutes");
 const congNoRoutes = require("./routes/congNoRoutes");
-const path = require("path");
 const app = express();
 app.use(cors({
     origin: true,
@@ -21,11 +20,6 @@ app.use(cors({
 }));
 
 
-app.use("/uploads", (req, res, next) => {
-  // Cho phép cross-origin load ảnh (fix CORB blocking cho SVG)
-  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-  next();
-}, express.static(path.join(__dirname, "../uploads")));
 app.use(express.json());
 
 // Routes
