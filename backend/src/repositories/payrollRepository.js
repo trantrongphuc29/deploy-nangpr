@@ -17,6 +17,61 @@ async function ensureKyLuong({ thang, nam }) {
   return rows[0];
 }
 
+// ===== Cờ "dữ liệu đã thay đổi" (dirty flag) =====
+// Mục đích: tránh tính lại toàn bộ bảng công / bảng lương ở MỖI lần GET.
+// Bất kỳ mutation nào ảnh hưởng tới bảng công / bảng lương (phancong, ngay_le,
+// bang_luong_dieu_chinh, nhanvien_luong) đều phải đánh dấu dirty tại đây;
+// GET chỉ recalc khi cờ dirty được set (hoặc bảng chưa từng được tính).
+async function markDirtyCong({ thang, nam }) {
+  await db.execute(
+    `UPDATE ky_luong SET dirty_cong_at = NOW() WHERE thang = ? AND nam = ?`,
+    [thang, nam]
+  );
+}
+
+async function markDirtyLuong({ thang, nam }) {
+  await db.execute(
+    `UPDATE ky_luong SET dirty_luong_at = NOW() WHERE thang = ? AND nam = ?`,
+    [thang, nam]
+  );
+}
+
+async function markDirtyBoth({ thang, nam }) {
+  await db.execute(
+    `UPDATE ky_luong SET dirty_cong_at = NOW(), dirty_luong_at = NOW() WHERE thang = ? AND nam = ?`,
+    [thang, nam]
+  );
+}
+
+async function markDirtyLuongByKy({ ky_luong_id }) {
+  await db.execute(`UPDATE ky_luong SET dirty_luong_at = NOW() WHERE id = ?`, [ky_luong_id]);
+}
+
+/** Đánh dấu dirty cho MỌI kỳ lương đang mở (dùng cho thao tác xóa hàng loạt phancong) */
+async function markAllOpenDirty() {
+  await db.execute(
+    `UPDATE ky_luong SET dirty_cong_at = NOW(), dirty_luong_at = NOW() WHERE trang_thai = 'chua_chot'`
+  );
+}
+
+/** Kiểm tra kỳ lương có cần tính lại bảng công / bảng lương không (1 query rẻ) */
+async function getRecalcStatus({ ky_luong_id }) {
+  const [rows] = await db.execute(
+    `SELECT
+       ky.dirty_cong_at IS NOT NULL AS cong_dirty,
+       ky.dirty_luong_at IS NOT NULL AS luong_dirty,
+       NOT EXISTS (SELECT 1 FROM bang_cong_thang bc WHERE bc.ky_luong_id = ky.id) AS cong_empty,
+       NOT EXISTS (SELECT 1 FROM bang_luong_thang bl WHERE bl.ky_luong_id = ky.id) AS luong_empty
+     FROM ky_luong ky WHERE ky.id = ?`,
+    [ky_luong_id]
+  );
+  const r = rows[0] || {};
+  return {
+    cong: Boolean(r.cong_dirty || r.cong_empty),
+    luong: Boolean(r.luong_dirty || r.luong_empty),
+  };
+}
+
 async function recalculateBangCong({ ky_luong_id, thang, nam }) {
   const firstDay = toYMD(nam, thang, 1);
   const lastDay = toYMD(nam, thang, new Date(nam, thang, 0).getDate());
@@ -86,6 +141,9 @@ async function recalculateBangCong({ ky_luong_id, thang, nam }) {
   `;
 
   await db.execute(insertSummarySql, [ky_luong_id]);
+
+  // Đã tính xong → xoá cờ dirty của bảng công
+  await db.execute(`UPDATE ky_luong SET dirty_cong_at = NULL WHERE id = ?`, [ky_luong_id]);
 }
 
 async function recalculateBangLuong({ ky_luong_id }) {
@@ -164,6 +222,9 @@ async function recalculateBangLuong({ ky_luong_id }) {
   `,
     [ky_luong_id, ky_luong_id]
   );
+
+  // Đã tính xong → xoá cờ dirty của bảng lương
+  await db.execute(`UPDATE ky_luong SET dirty_luong_at = NULL WHERE id = ?`, [ky_luong_id]);
 }
 
 // ===== Khoản điều chỉnh (thưởng / khấu trừ / tạm ứng) =====
@@ -202,12 +263,21 @@ async function addDieuChinh({ ky_luong_id, ma_nhan_vien, loai, so_tien, ly_do, n
     `,
     [ky_luong_id, ma_nhan_vien, loai, so_tien, ly_do, ngay]
   );
+  await markDirtyLuongByKy({ ky_luong_id });
   return result.insertId;
 }
 
 async function deleteDieuChinh({ id }) {
-  const [result] = await db.execute(`DELETE FROM bang_luong_dieu_chinh WHERE id = ?`, [id]);
-  return result.affectedRows > 0;
+  // Lấy ky_luong_id TRƯỚC khi xoá (sau khi xoá thì không còn để tra cứu)
+  const [rows] = await db.execute(
+    `SELECT ky_luong_id FROM bang_luong_dieu_chinh WHERE id = ?`,
+    [id]
+  );
+  const result = await db.execute(`DELETE FROM bang_luong_dieu_chinh WHERE id = ?`, [id]);
+  if (result[0].affectedRows > 0) {
+    if (rows.length) await markDirtyLuongByKy({ ky_luong_id: rows[0].ky_luong_id });
+  }
+  return result[0].affectedRows > 0;
 }
 
 async function getBangCongSummary({ ky_luong_id, ma_nhan_vien }) {
@@ -218,7 +288,7 @@ async function getBangCongSummary({ ky_luong_id, ma_nhan_vien }) {
     params.push(ma_nhan_vien);
   }
 
-  const [totalsRows] = await db.execute(
+  const totalsP = db.execute(
     `
       SELECT
         SUM(CASE WHEN COALESCE(bc.tong_ca, 0) > 0 THEN 1 ELSE 0 END) AS tong_nhan_vien_co_cong,
@@ -236,7 +306,7 @@ async function getBangCongSummary({ ky_luong_id, ma_nhan_vien }) {
   );
 
   const rowParams = ma_nhan_vien ? [ky_luong_id, ma_nhan_vien] : [ky_luong_id];
-  const [rows] = await db.execute(
+  const rowsP = db.execute(
     `
       SELECT
         nv.ma_nhan_vien,
@@ -263,6 +333,9 @@ async function getBangCongSummary({ ky_luong_id, ma_nhan_vien }) {
     `,
     rowParams
   );
+
+  // 2 query độc lập → chờ song song
+  const [[totalsRows], [rows]] = await Promise.all([totalsP, rowsP]);
 
   const totals = totalsRows[0] || {
     tong_nhan_vien_co_cong: 0,
@@ -370,7 +443,7 @@ async function getBangLuongSummary({ ky_luong_id, ma_nhan_vien }) {
     params.push(ma_nhan_vien);
   }
 
-  const [totalsRows] = await db.execute(
+  const totalsP = db.execute(
     `
       SELECT
         COUNT(*) AS tong_nhan_vien,
@@ -388,7 +461,7 @@ async function getBangLuongSummary({ ky_luong_id, ma_nhan_vien }) {
     params
   );
 
-  const [rows] = await db.execute(
+  const rowsP = db.execute(
     `
       SELECT
         bl.ma_nhan_vien,
@@ -411,6 +484,9 @@ async function getBangLuongSummary({ ky_luong_id, ma_nhan_vien }) {
     `,
     ma_nhan_vien ? [ky_luong_id, ma_nhan_vien] : [ky_luong_id]
   );
+
+  // 2 query độc lập → chờ song song
+  const [[totalsRows], [rows]] = await Promise.all([totalsP, rowsP]);
 
   const totals = totalsRows[0] || {
     tong_nhan_vien: 0,
@@ -622,16 +698,33 @@ async function upsertNgayLe({ ngay, ten, he_so }) {
      ON DUPLICATE KEY UPDATE ten = VALUES(ten), he_so = VALUES(he_so)`,
     [ngay, ten || null, he_so]
   );
+  // Ngày lễ ảnh hưởng hệ số giờ quy đổi trong bảng công → bảng lương
+  const parts = String(ngay).split("-");
+  if (parts.length === 3) {
+    await markDirtyBoth({ thang: Number(parts[1]), nam: Number(parts[0]) });
+  }
   return { ngay, ten: ten || null, he_so: Number(he_so) };
 }
 
 async function deleteNgayLe({ ngay }) {
   const [result] = await db.execute(`DELETE FROM ngay_le WHERE ngay = ?`, [ngay]);
+  if (result.affectedRows > 0) {
+    const parts = String(ngay).split("-");
+    if (parts.length === 3) {
+      await markDirtyBoth({ thang: Number(parts[1]), nam: Number(parts[0]) });
+    }
+  }
   return result.affectedRows > 0;
 }
 
 module.exports = {
   ensureKyLuong,
+  markDirtyCong,
+  markDirtyLuong,
+  markDirtyBoth,
+  markDirtyLuongByKy,
+  markAllOpenDirty,
+  getRecalcStatus,
   getNgayLe,
   upsertNgayLe,
   deleteNgayLe,

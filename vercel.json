@@ -5,7 +5,8 @@
   "functions": {
     "api/index.js": {
       "includeFiles": "backend/uploads/**",
-      "maxDuration": 60
+      "maxDuration": 60,
+      "regions": ["sin1"]
     }
   },
   "rewrites": [

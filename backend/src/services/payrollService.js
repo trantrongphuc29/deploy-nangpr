@@ -1,11 +1,22 @@
 const payrollRepository = require("../repositories/payrollRepository");
 
-async function getBangCong({ thang, nam, ma_nhan_vien }) {
-  const ky = await payrollRepository.ensureKyLuong({ thang, nam });
-
-  if (ky.trang_thai === "chua_chot") {
+/** Tính lại bảng công/bảng lương chỉ khi dữ liệu nguồn đã thay đổi (dirty flag).
+ *  Trước đây recalc ở MỌI lần GET (~650ms) — giờ chỉ chạy khi có mutation
+ *  (phancong, ngày lễ, khoản điều chỉnh, cấu hình lương...) hoặc bảng chưa từng tính. */
+async function recalcIfNeeded({ ky, thang, nam, bangCong = true, bangLuong = false }) {
+  if (ky.trang_thai !== "chua_chot") return;
+  const status = await payrollRepository.getRecalcStatus({ ky_luong_id: ky.id });
+  if (bangCong && status.cong) {
     await payrollRepository.recalculateBangCong({ ky_luong_id: ky.id, thang, nam });
   }
+  if (bangLuong && status.luong) {
+    await payrollRepository.recalculateBangLuong({ ky_luong_id: ky.id });
+  }
+}
+
+async function getBangCong({ thang, nam, ma_nhan_vien }) {
+  const ky = await payrollRepository.ensureKyLuong({ thang, nam });
+  await recalcIfNeeded({ ky, thang, nam, bangCong: true });
 
   const summary = await payrollRepository.getBangCongSummary({ ky_luong_id: ky.id, ma_nhan_vien });
   return { ky, ...summary };
@@ -13,9 +24,7 @@ async function getBangCong({ thang, nam, ma_nhan_vien }) {
 
 async function getBangCongChiTiet({ thang, nam, ma_nhan_vien }) {
   const ky = await payrollRepository.ensureKyLuong({ thang, nam });
-  if (ky.trang_thai === "chua_chot") {
-    await payrollRepository.recalculateBangCong({ ky_luong_id: ky.id, thang, nam });
-  }
+  await recalcIfNeeded({ ky, thang, nam, bangCong: true });
 
   const rows = await payrollRepository.getBangCongChiTiet({ ky_luong_id: ky.id, ma_nhan_vien });
   return { ky, ma_nhan_vien, rows };
@@ -23,12 +32,7 @@ async function getBangCongChiTiet({ thang, nam, ma_nhan_vien }) {
 
 async function getTopNhanVienNangNo({ thang, nam, limit }) {
   const ky = await payrollRepository.ensureKyLuong({ thang, nam });
-
-  // Bảng công chỉ được ghi lại khi có người mở trang Bảng công/Bảng lương.
-  // Dashboard phải tự tính lại, nếu không sẽ hiển thị số liệu cũ của tháng đang chạy.
-  if (ky.trang_thai === "chua_chot") {
-    await payrollRepository.recalculateBangCong({ ky_luong_id: ky.id, thang, nam });
-  }
+  await recalcIfNeeded({ ky, thang, nam, bangCong: true });
 
   const rows = await payrollRepository.getTopNhanVienNangNo({ ky_luong_id: ky.id, limit });
   return { ky, rows };
@@ -37,11 +41,8 @@ async function getTopNhanVienNangNo({ thang, nam, limit }) {
 async function getBangLuong({ thang, nam, ma_nhan_vien }) {
   const ky = await payrollRepository.ensureKyLuong({ thang, nam });
 
-  if (ky.trang_thai === "chua_chot") {
-    // Bảng công là nguồn để tính lương
-    await payrollRepository.recalculateBangCong({ ky_luong_id: ky.id, thang, nam });
-    await payrollRepository.recalculateBangLuong({ ky_luong_id: ky.id });
-  }
+  // Bảng công là nguồn để tính lương → cần cả hai khi dữ liệu thay đổi
+  await recalcIfNeeded({ ky, thang, nam, bangCong: true, bangLuong: true });
 
   const result = await payrollRepository.getBangLuongSummary({ ky_luong_id: ky.id, ma_nhan_vien });
   return { ky, ...result };

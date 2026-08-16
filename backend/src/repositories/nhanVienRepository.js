@@ -1,4 +1,5 @@
 const db = require("../config/database");
+const payrollRepository = require("./payrollRepository");
 
 const getAll = async () => {
   const sql = "SELECT ma_nhan_vien, ten, DATE_FORMAT(ngay_sinh, '%Y-%m-%d') as ngay_sinh, so_dien_thoai, dia_chi, trang_thai FROM nhanvien ORDER BY ma_nhan_vien DESC";
@@ -51,7 +52,8 @@ const getAssignments = async (queryOptions) => {
     sql += " AND pc.ngay = ?";
     params.push(startDate);
   } else {
-    sql += " AND pc.ngay + INTERVAL 7 HOUR = CURDATE() + INTERVAL 7 HOUR";
+    // pc.ngay là DATE; +7h cả 2 vế triệt tiêu → viết gọn để dùng được index idx_pc_ngay
+    sql += " AND pc.ngay = CURDATE()";
   }
 
   if (name) {
@@ -97,8 +99,17 @@ const createAssignment = async (assignment) => {
   const { ma_nhan_vien, ma_ca, ngay } = assignment;
   const sql = "INSERT INTO phancong (ma_nhan_vien, ma_ca, ngay) VALUES (?, ?, ?)";
   const [result] = await db.execute(sql, [ma_nhan_vien, ma_ca, ngay]);
+  markDirtyTheoNgay(ngay);
   return result;
 };
+
+/** Đánh dấu dirty kỳ lương chứa ngày vừa thay đổi phân công */
+function markDirtyTheoNgay(ngay) {
+  const parts = String(ngay || "").split("-");
+  if (parts.length === 3) {
+    payrollRepository.markDirtyBoth({ thang: Number(parts[1]), nam: Number(parts[0]) });
+  }
+}
 
 
 const removeFutureAssignments = async (ma_nhan_vien, tuNgay) => {
@@ -111,6 +122,7 @@ const removeFutureAssignments = async (ma_nhan_vien, tuNgay) => {
       AND COALESCE(kl.trang_thai, 'chua_chot') = 'chua_chot'
   `;
   const [result] = await db.execute(sql, [ma_nhan_vien, tuNgay]);
+  if (result.affectedRows > 0) await payrollRepository.markAllOpenDirty();
   return result.affectedRows;
 };
 
@@ -126,6 +138,7 @@ const removeFutureAssignmentsOfInactiveStaff = async (tuNgay) => {
       AND COALESCE(kl.trang_thai, 'chua_chot') = 'chua_chot'
   `;
   const [result] = await db.execute(sql, [tuNgay]);
+  if (result.affectedRows > 0) await payrollRepository.markAllOpenDirty();
   return result.affectedRows;
 };
 
@@ -154,6 +167,7 @@ const removeAssignment = async (assignment) => {
   const { ma_nhan_vien, ma_ca, ngay } = assignment;
   const sql = "DELETE FROM phancong WHERE ma_nhan_vien = ? AND ma_ca = ? AND ngay = ?";
   const [result] = await db.execute(sql, [ma_nhan_vien, ma_ca, ngay]);
+  if (result.affectedRows > 0) markDirtyTheoNgay(ngay);
   return result.affectedRows > 0;
 };
 
