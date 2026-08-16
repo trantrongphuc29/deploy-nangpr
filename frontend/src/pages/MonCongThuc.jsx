@@ -429,6 +429,7 @@ function FormulaModal({ mon, nguyenLieuList, onClose, onSaved }) {
                 value={selectedIngredient ? selectedIngredient.ten_nguyen_lieu : searchNL}
                 role="combobox"
                 aria-expanded={moBangNL}
+                aria-controls="combobox-ingredient-list"
                 aria-haspopup="listbox"
                 onChange={(e) => {
                   setSearchNL(e.target.value);
@@ -461,6 +462,7 @@ function FormulaModal({ mon, nguyenLieuList, onClose, onSaved }) {
 
               {moBangNL && (
                 <div
+                  id="combobox-ingredient-list"
                   role="listbox"
                   className="absolute z-20 mt-1 w-full max-h-56 overflow-y-auto rounded-xl border border-outline shadow-lg custom-scrollbar"
                   style={{ backgroundColor: "var(--color-card-bg)" }}
