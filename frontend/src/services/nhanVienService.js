@@ -1,0 +1,57 @@
+import axiosClient from "./axiosClient";
+
+export const getNhanVienList = async () => {
+  const response = await axiosClient.get("/api/nhanvien");
+  return response.data;
+};
+
+export const getDanhSachCa = async () => {
+  const response = await axiosClient.get("/api/nhanvien/ca");
+  return Array.isArray(response.data) ? response.data : [];
+};
+
+export const getLichPhanCong = async ({ startDate, endDate }) => {
+  const response = await axiosClient.get(
+    `/api/nhanvien/lich-phan-cong?startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(endDate)}`
+  );
+  const data = response.data;
+  return Array.isArray(data) ? data : [];
+};
+
+/** Các kỳ lương đã chốt/đã thanh toán — lịch phân công của tháng đó bị khoá */
+export const getKyLuongDaChot = async () => {
+  const response = await axiosClient.get("/api/nhanvien/ky-luong-da-chot");
+  return Array.isArray(response.data) ? response.data : [];
+};
+
+export const createNhanVien = async (payload) => {
+  const response = await axiosClient.post("/api/nhanvien", payload);
+  return response.data;
+};
+
+export const updateNhanVien = async (id, payload) => {
+  const response = await axiosClient.put(`/api/nhanvien/${id}`, payload);
+  return response.data;
+};
+
+export const deleteNhanVien = async (id) => {
+  const response = await axiosClient.delete(`/api/nhanvien/${id}`);
+  return response.data;
+};
+
+export const createPhanCong = async (payload) => {
+  const response = await axiosClient.post("/api/nhanvien/phan-cong", payload);
+  return response.data;
+};
+
+export const deletePhanCong = async (payload) => {
+  const response = await axiosClient.delete("/api/nhanvien/phan-cong", {
+    data: payload,
+  });
+  return response.data;
+};
+// Thêm hàm này vào file nhanVienService.js của bạn
+export const updateNhanVienStatus = async (id, trang_thai) => {
+  const response = await axiosClient.patch(`/api/nhanvien/${id}/status`, { trang_thai });
+  return response.data;
+};

@@ -1,0 +1,511 @@
+import * as XLSX from "xlsx";
+import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
+import { registerPdfFonts, PDF_FONT } from "./pdfFonts";
+import { getPdfTheme } from "./pdfTheme";
+
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+function moneyNum(n) {
+  return Math.round(Number(n) || 0);
+}
+
+function moneyText(n) {
+  return moneyNum(n).toLocaleString("vi-VN");
+}
+
+function hoursText(n) {
+  return Number(n || 0).toLocaleString("vi-VN", { maximumFractionDigits: 2 });
+}
+
+const SALARY_HEADERS = [
+  "Nhân viên",
+  "Tổng ca",
+  "Tổng giờ",
+  "Lương/giờ",
+  "Lương cơ bản",
+  "Phụ cấp",
+  "Thưởng",
+  "Khấu trừ",
+  "Tạm ứng",
+  "Lương thực nhận",
+];
+
+function rowToExportCells(r) {
+  return [
+    r.ten || "",
+    moneyNum(r.tong_ca),
+    Number(r.tong_gio) || 0,
+    moneyNum(r.luong_gio),
+    moneyNum(r.luong_co_ban),
+    moneyNum(r.phu_cap),
+    moneyNum(r.thuong),
+    moneyNum(r.khau_tru),
+    moneyNum(r.tam_ung),
+    moneyNum(r.luong_thuc_nhan),
+  ];
+}
+
+function totalsToExportCells(totals) {
+  return [
+    "TỔNG CỘNG",
+    "",
+    Number(totals?.tong_gio) || 0,
+    "",
+    moneyNum(totals?.tong_luong_co_ban),
+    moneyNum(totals?.tong_phu_cap),
+    moneyNum(totals?.tong_thuong),
+    moneyNum(totals?.tong_khau_tru),
+    moneyNum(totals?.tong_tam_ung),
+    moneyNum(totals?.tong_tien_phai_tra),
+  ];
+}
+
+function formatRowForDisplay(cells) {
+  return cells.map((cell, i) => {
+    if (i === 0) return String(cell);
+    if (i === 1) return String(cell);
+    if (i === 2) return hoursText(cell);
+    if (cell === "") return "";
+    return moneyText(cell);
+  });
+}
+
+function slugifyName(str) {
+  return String(str || "nhan_vien")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/gi, "d")
+    .replace(/[^a-zA-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase() || "nhan_vien";
+}
+
+// Các dòng của phiếu lương cá nhân — chỉ những khoản nhân viên cần biết,
+// không có trạng thái kỳ / tổng tiền phải trả / tổng cộng toàn quán.
+function payslipLines(r) {
+  return [
+    ["Tổng ca làm", String(moneyNum(r.tong_ca)), false],
+    ["Tổng giờ làm", hoursText(r.tong_gio), false],
+    ["Lương/giờ", `${moneyText(r.luong_gio)} đ`, false],
+    ["Lương cơ bản", `${moneyText(r.luong_co_ban)} đ`, false],
+    ["Phụ cấp", `${moneyText(r.phu_cap)} đ`, false],
+    ["Thưởng", `${moneyText(r.thuong)} đ`, false],
+    ["Khấu trừ", `${moneyText(r.khau_tru)} đ`, false],
+    ["Tạm ứng", `${moneyText(r.tam_ung)} đ`, false],
+    ["Lương thực nhận", `${moneyText(r.luong_thuc_nhan)} đ`, true],
+  ];
+}
+
+export function exportBangLuongExcel({ rows, totals, thang, nam, kyLabel }) {
+  if (!rows?.length) {
+    throw new Error("Không có dữ liệu để xuất");
+  }
+
+  // Xuất cho 1 nhân viên -> phiếu lương cá nhân để đưa cho họ.
+  if (rows.length === 1) {
+    return exportPhieuLuongExcel({ row: rows[0], thang, nam });
+  }
+
+  const sheetData = [
+    [`BẢNG LƯƠNG THÁNG ${pad2(thang)}/${nam}`],
+    [`Trạng thái kỳ: ${kyLabel}`],
+    [`Số nhân viên: ${rows.length}`],
+    [],
+    SALARY_HEADERS,
+    ...rows.map(rowToExportCells),
+    [],
+    totalsToExportCells(totals),
+  ];
+
+  const ws = XLSX.utils.aoa_to_sheet(sheetData);
+  ws["!cols"] = [
+    { wch: 28 },
+    { wch: 10 },
+    { wch: 10 },
+    { wch: 14 },
+    { wch: 16 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 18 },
+  ];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Bảng lương");
+  XLSX.writeFile(wb, `bang_luong_${nam}-${pad2(thang)}.xlsx`);
+}
+
+export function exportPhieuLuongExcel({ row, thang, nam }) {
+  if (!row) {
+    throw new Error("Không có dữ liệu để xuất");
+  }
+
+  const sheetData = [
+    [`PHIẾU LƯƠNG THÁNG ${pad2(thang)}/${nam}`],
+    [`Nhân viên: ${row.ten || ""}`],
+    [`Ngày xuất: ${new Date().toLocaleDateString("vi-VN")}`],
+    [],
+    ["Khoản mục", "Giá trị"],
+    ...payslipLines(row).map(([label, value]) => [label, value]),
+  ];
+
+  const ws = XLSX.utils.aoa_to_sheet(sheetData);
+  ws["!cols"] = [{ wch: 22 }, { wch: 22 }];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Phiếu lương");
+  XLSX.writeFile(wb, `phieu_luong_${slugifyName(row.ten)}_${nam}-${pad2(thang)}.xlsx`);
+}
+
+export function exportPhieuNhapExcel({ rows, tuNgay, denNgay }) {
+  if (!rows?.length) {
+    throw new Error("Không có dữ liệu để xuất");
+  }
+
+  const HEADERS = [
+    "Mã phiếu",
+    "Ngày nhập",
+    "Nhà cung cấp",
+    "Tổng tiền",
+    "Đã thanh toán",
+    "Còn nợ",
+    "Trạng thái",
+  ];
+
+  function rowToCells(r) {
+    const conNo = Number(r.con_no || 0);
+    const isPaid = conNo <= 0;
+    return [
+      String(r.ma_phieu || ""),
+      r.ngay_nhap ? new Date(r.ngay_nhap).toLocaleDateString("vi-VN") : "",
+      r.nha_cung_cap || "",
+      Math.round(Number(r.tong_tien) || 0),
+      Math.round(Number(r.so_tien_da_tra) || 0),
+      Math.round(conNo),
+      isPaid ? "Đã thanh toán" : "Chưa thanh toán",
+    ];
+  }
+
+  const sheetData = [
+    ["DANH SÁCH PHIẾU NHẬP"],
+    tuNgay && denNgay ? [`Từ ${tuNgay} đến ${denNgay}`] : [],
+    [`Số phiếu: ${rows.length}`],
+    [],
+    HEADERS,
+    ...rows.map(rowToCells),
+  ];
+
+  const ws = XLSX.utils.aoa_to_sheet(sheetData);
+  ws["!cols"] = [
+    { wch: 12 },
+    { wch: 16 },
+    { wch: 28 },
+    { wch: 16 },
+    { wch: 16 },
+    { wch: 16 },
+    { wch: 18 },
+  ];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Phiếu nhập");
+  XLSX.writeFile(wb, `danh_sach_phieu_nhap_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
+export function exportDoanhThuExcel({ orders, tuNgay, denNgay }) {
+  if (!orders?.length) {
+    throw new Error("Không có dữ liệu để xuất");
+  }
+
+  const HEADERS = [
+    "Mã đơn hàng",
+    "Thời gian",
+    "Bàn / Loại",
+    "Số lượng",
+    "Tiền món",
+    "Phí giao hàng",
+    "Tổng thanh toán",
+    "Hình thức thanh toán",
+  ];
+
+  const loaiDonLabel = { tai_cho: "Tại chỗ", mang_ve: "Mang về", giao_hang: "Giao hàng" };
+  const hinhThucLabel = { tien_mat: "Tiền mặt", chuyen_khoan: "Chuyển khoản" };
+
+  const tienMon = (r) => Math.round(Number(r.tong_tien) || 0);
+  const phiShip = (r) => Math.round(Number(r.phi_giao_hang) || 0);
+
+  function rowToCells(r) {
+    const items = r.items || [];
+    const soLuong = items.reduce((s, item) => s + Number(item.so_luong || 0), 0);
+    return [
+      String(r.ma_don_hang || ""),
+      r.ngay_tao ? new Date(r.ngay_tao).toLocaleString("vi-VN") : "",
+      r.ten_ban || loaiDonLabel[r.loai_don] || "",
+      soLuong,
+      tienMon(r),
+      phiShip(r),
+      tienMon(r) + phiShip(r),
+      hinhThucLabel[r.hinh_thuc_thanh_toan] || "Tiền mặt",
+    ];
+  }
+
+  const tongTienMon = orders.reduce((s, r) => s + tienMon(r), 0);
+  const tongPhi = orders.reduce((s, r) => s + phiShip(r), 0);
+
+  const sheetData = [
+    ["DANH SÁCH ĐƠN HÀNG"],
+    tuNgay && denNgay ? [`Từ ${tuNgay} đến ${denNgay}`] : [],
+    [`Số đơn: ${orders.length}`],
+    [],
+    HEADERS,
+    ...orders.map(rowToCells),
+    [],
+    ["TỔNG CỘNG", "", "", "", tongTienMon, tongPhi, tongTienMon + tongPhi, ""],
+  ];
+
+  const ws = XLSX.utils.aoa_to_sheet(sheetData);
+  ws["!cols"] = [
+    { wch: 14 },
+    { wch: 22 },
+    { wch: 16 },
+    { wch: 12 },
+    { wch: 16 },
+    { wch: 14 },
+    { wch: 18 },
+    { wch: 18 },
+  ];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Doanh thu");
+  XLSX.writeFile(wb, `danh_sach_don_hang_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
+export function exportDiscardHistoryExcel({ rows }) {
+  if (!rows?.length) {
+    throw new Error("Không có dữ liệu để xuất");
+  }
+
+  const HEADERS = [
+    "Nguyên liệu",
+    "Hạn sử dụng",
+    "Tồn kho hủy",
+    "Đơn vị",
+    "Ngày xử lý",
+    "Ghi chú",
+  ];
+
+  function rowToCells(r) {
+    return [
+      r.ten_nguyen_lieu || "",
+      r.han_su_dung
+        ? new Date(r.han_su_dung).toLocaleDateString("vi-VN")
+        : "—",
+      Number(r.ton_kho_con_lai || 0),
+      r.don_vi || "",
+      r.ngay_xu_ly
+        ? new Date(r.ngay_xu_ly).toLocaleDateString("vi-VN")
+        : "—",
+      r.ghi_chu || "",
+    ];
+  }
+
+  const sheetData = [
+    ["LỊCH SỬ HỦY NGUYÊN LIỆU"],
+    [`Ngày xuất: ${new Date().toLocaleDateString("vi-VN")}`],
+    [`Số phiếu: ${rows.length}`],
+    [],
+    HEADERS,
+    ...rows.map(rowToCells),
+  ];
+
+  const ws = XLSX.utils.aoa_to_sheet(sheetData);
+  ws["!cols"] = [
+    { wch: 28 },
+    { wch: 16 },
+    { wch: 16 },
+    { wch: 12 },
+    { wch: 16 },
+    { wch: 40 },
+  ];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Lịch sử hủy hàng");
+  XLSX.writeFile(wb, `lich_su_huy_hang_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
+export async function exportBangLuongPDF({ rows, totals, thang, nam, kyLabel }) {
+  if (!rows?.length) {
+    throw new Error("Không có dữ liệu để xuất");
+  }
+
+  // Xuất cho 1 nhân viên -> phiếu lương cá nhân để đưa cho họ.
+  if (rows.length === 1) {
+    return exportPhieuLuongPDF({ row: rows[0], thang, nam });
+  }
+
+  const theme = getPdfTheme();
+  const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+  await registerPdfFonts(doc);
+
+  const pageW = doc.internal.pageSize.getWidth();
+
+  doc.setFont(PDF_FONT, "bold");
+  doc.setFontSize(15);
+  doc.setTextColor(...theme.primary);
+  doc.text(`BẢNG LƯƠNG THÁNG ${pad2(thang)}/${nam}`, pageW / 2, 14, { align: "center" });
+
+  doc.setFont(PDF_FONT, "normal");
+  doc.setFontSize(10);
+  doc.setTextColor(...theme.muted);
+  doc.text(`Trạng thái kỳ: ${kyLabel}`, 14, 22);
+
+  doc.setTextColor(...theme.text);
+  doc.setFont(PDF_FONT, "bold");
+  doc.text(`Tổng tiền phải trả: ${moneyText(totals?.tong_tien_phai_tra)} đ`, 14, 28);
+  doc.setFont(PDF_FONT, "normal");
+
+  const body = rows.map((r) => formatRowForDisplay(rowToExportCells(r)));
+  const foot = [formatRowForDisplay(totalsToExportCells(totals))];
+
+  autoTable(doc, {
+    startY: 34,
+    head: [SALARY_HEADERS],
+    body,
+    foot,
+    theme: "grid",
+    styles: {
+      font: PDF_FONT,
+      fontSize: 8,
+      cellPadding: 2.5,
+      overflow: "linebreak",
+      textColor: theme.text,
+      lineColor: theme.border,
+      lineWidth: 0.15,
+      fillColor: theme.surface,
+    },
+    headStyles: {
+      font: PDF_FONT,
+      fillColor: theme.primary,
+      textColor: theme.onPrimary,
+      fontStyle: "bold",
+      halign: "center",
+      valign: "middle",
+      minCellHeight: 8,
+      overflow: "visible",
+    },
+    footStyles: {
+      font: PDF_FONT,
+      fillColor: theme.primaryContainer,
+      textColor: theme.text,
+      fontStyle: "bold",
+    },
+    alternateRowStyles: {
+      fillColor: theme.mainBg,
+    },
+    columnStyles: {
+      0: { halign: "left", cellWidth: 40 },
+      1: { halign: "center", cellWidth: 20 },
+      2: { halign: "right", cellWidth: 16 },
+      3: { halign: "right", cellWidth: 21 },
+      4: { halign: "right", cellWidth: 25 },
+      5: { halign: "right", cellWidth: 21 },
+      6: { halign: "right", cellWidth: 21 },
+      7: { halign: "right", cellWidth: 21 },
+      8: { halign: "right", cellWidth: 21 },
+      9: { halign: "right", cellWidth: 27, fontStyle: "bold" },
+    },
+    margin: { left: 14, right: 14 },
+    didDrawPage: (data) => {
+      const pageCount = doc.getNumberOfPages();
+      doc.setFont(PDF_FONT, "normal");
+      doc.setFontSize(8);
+      doc.setTextColor(...theme.muted);
+      doc.text(
+        `Trang ${data.pageNumber} / ${pageCount}`,
+        pageW - 14,
+        doc.internal.pageSize.getHeight() - 8,
+        { align: "right" }
+      );
+    },
+  });
+
+  doc.save(`bang_luong_${nam}-${pad2(thang)}.pdf`);
+}
+
+export async function exportPhieuLuongPDF({ row, thang, nam }) {
+  if (!row) {
+    throw new Error("Không có dữ liệu để xuất");
+  }
+
+  const theme = getPdfTheme();
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  await registerPdfFonts(doc);
+
+  const pageW = doc.internal.pageSize.getWidth();
+
+  doc.setFont(PDF_FONT, "bold");
+  doc.setFontSize(16);
+  doc.setTextColor(...theme.primary);
+  doc.text(`PHIẾU LƯƠNG THÁNG ${pad2(thang)}/${nam}`, pageW / 2, 20, { align: "center" });
+
+  doc.setFont(PDF_FONT, "bold");
+  doc.setFontSize(12);
+  doc.setTextColor(...theme.text);
+  doc.text(`Nhân viên: ${row.ten || ""}`, 16, 32);
+
+  doc.setFont(PDF_FONT, "normal");
+  doc.setFontSize(10);
+  doc.setTextColor(...theme.muted);
+  doc.text(`Ngày xuất: ${new Date().toLocaleDateString("vi-VN")}`, 16, 39);
+
+  const lines = payslipLines(row);
+  const body = lines.filter(([, , highlight]) => !highlight).map(([label, value]) => [label, value]);
+  const foot = lines.filter(([, , highlight]) => highlight).map(([label, value]) => [label, value]);
+
+  autoTable(doc, {
+    startY: 46,
+    head: [["Khoản mục", "Giá trị"]],
+    body,
+    foot,
+    theme: "grid",
+    styles: {
+      font: PDF_FONT,
+      fontSize: 11,
+      cellPadding: 3.5,
+      overflow: "linebreak",
+      textColor: theme.text,
+      lineColor: theme.border,
+      lineWidth: 0.15,
+      fillColor: theme.surface,
+    },
+    headStyles: {
+      font: PDF_FONT,
+      fillColor: theme.primary,
+      textColor: theme.onPrimary,
+      fontStyle: "bold",
+      halign: "left",
+      valign: "middle",
+      minCellHeight: 9,
+    },
+    footStyles: {
+      font: PDF_FONT,
+      fillColor: theme.primaryContainer,
+      textColor: theme.text,
+      fontStyle: "bold",
+      fontSize: 12,
+    },
+    alternateRowStyles: {
+      fillColor: theme.mainBg,
+    },
+    columnStyles: {
+      0: { halign: "left", cellWidth: 90 },
+      1: { halign: "right", fontStyle: "bold" },
+    },
+    margin: { left: 16, right: 16 },
+  });
+
+  doc.save(`phieu_luong_${slugifyName(row.ten)}_${nam}-${pad2(thang)}.pdf`);
+}

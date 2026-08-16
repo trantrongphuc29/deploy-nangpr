@@ -1,0 +1,397 @@
+/* =====  NGUYÊN LIỆU  =====
+ * Thao tác SQL trực tiếp với bảng nguyenlieu, phieunhap, chitiet_phieunhap
+ * ========================================= */
+const db = require("../config/database");
+
+const NguyenLieuRepository = {
+  //  Nhập hàng vào kho 
+  importGoods: async (data) => {
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
+
+      // 1. Chèn thông tin tổng quan hóa đơn vào bảng `phieunhap`
+      // Lưu giờ UTC để MySQL không bị lệch múi giờ, trình duyệt tự chuyển về giờ VN
+      const utcStr = new Date().toISOString().replace('T', ' ').slice(0, 19);
+      // Chuyển ngày giờ từ form (giờ VN) thành UTC để lưu MySQL
+      // Hỗ trợ cả datetime-local (YYYY-MM-DDTHH:MM) và date (YYYY-MM-DD)
+      const ngayNhapStr = data.ngay_nhap
+        ? new Date((data.ngay_nhap.includes('T') ? data.ngay_nhap : data.ngay_nhap + 'T00:00') + ':00+07:00').toISOString().replace('T', ' ').slice(0, 19)
+        : utcStr;
+
+      const [resPhieu] = await conn.execute(
+        "INSERT INTO phieunhap (tong_tien, nha_cung_cap, ghi_chu, ngay_nhap) VALUES (?, ?, ?, ?)",
+        [
+          parseFloat(data.tong_tien || 0),
+          data.nha_cung_cap?.trim() || "Đại lý tự do",
+          data.ghi_chu?.trim() || "Nhập kho hệ thống",
+          ngayNhapStr
+        ]
+      );
+      const ma_phieu = resPhieu.insertId;
+
+      // 2. Vòng lặp bóc tách chi tiết hàng nhập
+      if (data.items && data.items.length > 0) {
+        for (const item of data.items) {
+          const cleanVolume = parseFloat(item.so_luong || 0);
+          const cleanPrice = parseFloat(item.gia_nhap || 0);
+          const cleanId = parseInt(item.ma_nguyen_lieu, 10);
+
+          await conn.execute(
+            "INSERT INTO chitiet_phieunhap (ma_phieu, ma_nguyen_lieu, so_luong_nhap, gia_nhap) VALUES (?, ?, ?, ?)",
+            [ma_phieu, cleanId, cleanVolume, cleanPrice]
+          );
+
+          // CẬP NHẬT TỒN: Nếu là Nguyên liệu pha chế (nhập kg quy đổi g) thì nhân dung_tich_san_pham. Còn lại cộng trực tiếp cái/chai/lon.
+          await conn.execute(
+            `UPDATE nguyenlieu 
+             SET ton_kho = ton_kho + IF(danh_muc = 'Nguyên liệu pha chế', ( ? * dung_tich_san_pham ), ?) 
+             WHERE ma_nguyen_lieu = ?`,
+            [cleanVolume, cleanVolume, cleanId]
+          );
+
+          // Cập nhật hạn sử dụng nếu có (nhập kho kèm hạn)
+          if (item.han_su_dung) {
+            await conn.execute(
+              `UPDATE nguyenlieu SET han_su_dung = ? WHERE ma_nguyen_lieu = ?`,
+              [item.han_su_dung, cleanId]
+            );
+          }
+        }
+      }
+
+      await conn.commit();
+
+      // Sau commit, kiểm tra xử lý hết hạn cho các item có hạn sử dụng
+      const expiredItems = (data.items || []).filter(item => item.han_su_dung);
+      for (const item of expiredItems) {
+        const nl = await db.execute(`SELECT ten_nguyen_lieu, danh_muc, don_vi_tinh, don_vi_nhap FROM nguyenlieu WHERE ma_nguyen_lieu = ?`, [parseInt(item.ma_nguyen_lieu, 10)]);
+        if (nl[0].length > 0) {
+          const row = nl[0][0];
+          await handleExpiredRow(
+            parseInt(item.ma_nguyen_lieu, 10),
+            row.ten_nguyen_lieu,
+            row.danh_muc,
+            row.don_vi_tinh,
+            row.don_vi_nhap,
+            item.han_su_dung
+          );
+        }
+      }
+
+      return { ma_phieu };
+    } catch (error) {
+      await conn.rollback();
+      throw error;
+    } finally {
+      conn.release();
+    }
+  },
+
+  getImportHistory: async () => {
+    const sql = `
+      SELECT 
+        pn.ma_phieu, 
+        pn.ngay_nhap, 
+        COALESCE(NULLIF(TRIM(pn.nha_cung_cap), ''), 'Đại lý tự do') AS nha_cung_cap, 
+        pn.tong_tien,
+        pn.ghi_chu,
+        JSON_ARRAYAGG(
+          JSON_OBJECT(
+            'ten_nguyen_lieu', nl.ten_nguyen_lieu,
+            'so_luong', ct.so_luong_nhap,
+            'gia_nhap', ct.gia_nhap,
+            'don_vi_tinh', IF(nl.danh_muc = 'Nguyên liệu pha chế', nl.don_vi_tinh, nl.don_vi_nhap),
+            'don_vi_nhap', nl.don_vi_nhap
+          )
+        ) as chi_tiet_hang
+      FROM phieunhap pn
+      LEFT JOIN chitiet_phieunhap ct ON pn.ma_phieu = ct.ma_phieu
+      LEFT JOIN nguyenlieu nl ON ct.ma_nguyen_lieu = nl.ma_nguyen_lieu
+      GROUP BY pn.ma_phieu
+      ORDER BY pn.ma_phieu DESC
+    `;
+    const [rows] = await db.execute(sql);
+    return rows;
+  },
+
+  getStats: async () => {
+    const [day] = await db.execute(`SELECT COALESCE(SUM(tong_tien), 0) as total FROM phieunhap WHERE DATE(ngay_nhap + INTERVAL 7 HOUR) = DATE(NOW() + INTERVAL 7 HOUR)`);
+    const [week] = await db.execute(`SELECT COALESCE(SUM(tong_tien), 0) as total FROM phieunhap WHERE YEARWEEK(ngay_nhap + INTERVAL 7 HOUR, 1) = YEARWEEK(NOW() + INTERVAL 7 HOUR, 1)`);
+    const [month] = await db.execute(`SELECT COALESCE(SUM(tong_tien), 0) as total FROM phieunhap WHERE MONTH(ngay_nhap + INTERVAL 7 HOUR) = MONTH(NOW() + INTERVAL 7 HOUR) AND YEAR(ngay_nhap + INTERVAL 7 HOUR) = YEAR(NOW() + INTERVAL 7 HOUR)`);
+    const [year] = await db.execute(`SELECT COALESCE(SUM(tong_tien), 0) as total FROM phieunhap WHERE YEAR(ngay_nhap + INTERVAL 7 HOUR) = YEAR(NOW() + INTERVAL 7 HOUR)`);
+
+    return {
+      day: Number(day[0].total),
+      week: Number(week[0].total),
+      month: Number(month[0].total),
+      year: Number(year[0].total),
+    };
+  },
+
+  getCategories: async () => {
+    const sql = `SELECT DISTINCT COALESCE(danh_muc, 'Nguyên liệu pha chế') AS danh_muc FROM nguyenlieu WHERE danh_muc IS NOT NULL AND danh_muc != '' ORDER BY danh_muc ASC`;
+    const [rows] = await db.execute(sql);
+    return rows.map((r) => r.danh_muc);
+  },
+
+  getAll: async () => {
+    const [rows] = await db.execute(`
+      SELECT 
+        ma_nguyen_lieu, ten_nguyen_lieu,
+        COALESCE(danh_muc, 'Nguyên liệu pha chế') AS danh_muc,
+        don_vi_tinh, don_vi_nhap,
+        CAST(dung_tich_san_pham AS DECIMAL(10,2)) AS dung_tich_san_pham, 
+        CAST(ton_kho AS DECIMAL(10,2)) AS ton_kho, 
+        CAST(nguong_canh_bao AS DECIMAL(10,2)) AS nguong_canh_bao,
+        COALESCE(ghi_chu, '') AS ghi_chu,
+        COALESCE(trang_thai, 1) AS trang_thai,
+        han_su_dung
+      FROM nguyenlieu 
+      ORDER BY ten_nguyen_lieu ASC
+    `);
+    return rows;
+  },
+
+  create: async (data) => {
+    const ten_nguyen_lieu = data.ten_nguyen_lieu ? String(data.ten_nguyen_lieu).trim() : '';
+    const danh_muc = data.danh_muc ? String(data.danh_muc).trim() : 'Nguyên liệu pha chế';
+    const don_vi_tinh = data.don_vi_tinh || 'g';
+    const don_vi_nhap = data.don_vi_nhap || 'kg';
+    const dung_tich_san_pham = parseFloat(data.dung_tich_san_pham) || 1.00;
+    const nguong_canh_bao = parseFloat(data.nguong_canh_bao) || 0.00;
+    const ghi_chu = data.ghi_chu ? String(data.ghi_chu).trim() : null;
+    const han_su_dung = data.han_su_dung || null;
+
+    const [result] = await db.execute(
+      `INSERT INTO nguyenlieu (ten_nguyen_lieu, danh_muc, don_vi_tinh, don_vi_nhap, dung_tich_san_pham, ton_kho, nguong_canh_bao, ghi_chu, trang_thai, han_su_dung) VALUES (?, ?, ?, ?, ?, 0.00, ?, ?, 1, ?)`,
+      [ten_nguyen_lieu, danh_muc, don_vi_tinh, don_vi_nhap, dung_tich_san_pham, nguong_canh_bao, ghi_chu, han_su_dung]
+    );
+    const newId = result.insertId;
+
+    return newId;
+  },
+
+  update: async (id, data) => {
+    const ten_nguyen_lieu = data.ten_nguyen_lieu ? String(data.ten_nguyen_lieu).trim() : '';
+    const danh_muc = data.danh_muc ? String(data.danh_muc).trim() : 'Nguyên liệu pha chế';
+    const don_vi_tinh = data.don_vi_tinh || 'g';
+    const don_vi_nhap = data.don_vi_nhap || 'kg';
+    const dung_tich_san_pham = parseFloat(data.dung_tich_san_pham) || 1.00;
+    const nguong_canh_bao = parseFloat(data.nguong_canh_bao) || 0.00;
+    const ghi_chu = data.ghi_chu ? String(data.ghi_chu).trim() : null;
+    const han_su_dung = data.han_su_dung || null;
+    const cleanId = parseInt(id, 10);
+
+    const [result] = await db.execute(
+      `UPDATE nguyenlieu SET ten_nguyen_lieu = ?, danh_muc = ?, don_vi_tinh = ?, don_vi_nhap = ?, dung_tich_san_pham = ?, nguong_canh_bao = ?, ghi_chu = ?, han_su_dung = ? WHERE ma_nguyen_lieu = ?`,
+      [ten_nguyen_lieu, danh_muc, don_vi_tinh, don_vi_nhap, dung_tich_san_pham, nguong_canh_bao, ghi_chu, han_su_dung, cleanId]
+    );
+
+    return result.affectedRows > 0;
+  },
+
+  setStatus: async (id, trang_thai) => {
+    const [result] = await db.execute("UPDATE nguyenlieu SET trang_thai = ? WHERE ma_nguyen_lieu = ?", [trang_thai ? 1 : 0, parseInt(id, 10)]);
+    return result.affectedRows > 0;
+  },
+
+  delete: async (id) => {
+    const cleanId = parseInt(id, 10);
+
+    // Ràng buộc DUY NHẤT: nguyên liệu đang nằm trong công thức của món nào đó
+    const [ctMon] = await db.execute(
+      `SELECT m.ten_mon
+       FROM congthuc ct
+       JOIN mon m ON m.ma_mon = ct.ma_mon
+       WHERE ct.ma_nguyen_lieu = ?
+       LIMIT 1`,
+      [cleanId]
+    );
+    if (ctMon.length > 0) {
+      throw new Error(
+        `Không thể xóa nguyên liệu này vì đang được dùng trong công thức của món "${ctMon[0].ten_mon}". Vui lòng gỡ nguyên liệu khỏi công thức trước khi xóa.`
+      );
+    }
+
+    // Nguyên liệu không nằm trong công thức nào → cho phép xóa.
+    // Vì chitiet_phieunhap / lich_su_huy_hang có khóa ngoại RESTRICT,
+    // phải xóa các bản ghi liên quan trong cùng transaction để không bị MySQL chặn.
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
+
+      await conn.execute("DELETE FROM lich_su_huy_hang WHERE ma_nguyen_lieu = ?", [cleanId]);
+      await conn.execute("DELETE FROM chitiet_phieunhap WHERE ma_nguyen_lieu = ?", [cleanId]);
+
+      const [result] = await conn.execute("DELETE FROM nguyenlieu WHERE ma_nguyen_lieu = ?", [cleanId]);
+
+      await conn.commit();
+      return result.affectedRows > 0;
+    } catch (error) {
+      await conn.rollback();
+      // Phòng trường hợp có bản ghi mới chèn vào giữa lúc kiểm tra và lúc xóa (race condition)
+      if (error && error.errno === 1451) {
+        throw new Error(
+          "Không thể xóa nguyên liệu này vì nó vẫn đang được tham chiếu bởi dữ liệu khác (công thức món)."
+        );
+      }
+      throw error;
+    } finally {
+      conn.release();
+    }
+  },
+
+  //  LẤY LỊCH SỬ HỦY HÀNG
+  findByName: async (name, excludeId = null) => {
+    let sql = "SELECT ma_nguyen_lieu FROM nguyenlieu WHERE ten_nguyen_lieu = ?";
+    const params = [name];
+    if (excludeId !== null) {
+      sql += " AND ma_nguyen_lieu != ?";
+      params.push(parseInt(excludeId, 10));
+    }
+    const [rows] = await db.execute(sql, params);
+    return rows.length > 0 ? rows[0] : null;
+  },
+
+  getDiscardHistory: async () => {
+    const [rows] = await db.execute(
+      `SELECT id, ma_nguyen_lieu, ten_nguyen_lieu, han_su_dung, 
+              CAST(ton_kho_con_lai AS DECIMAL(10,2)) AS ton_kho_con_lai, don_vi,
+              ngay_xu_ly, ghi_chu, created_at
+       FROM lich_su_huy_hang 
+       ORDER BY ngay_xu_ly DESC, created_at DESC`
+    );
+    return rows;
+  },
+};
+
+//  KIỂM TRA VÀ GHI LOG KHI LƯU NGUYÊN LIỆU CÓ HẠN SỬ DỤNG ĐÃ QUA
+
+async function handleExpiredRow(ma_nguyen_lieu, ten_nguyen_lieu, danh_muc, don_vi_tinh, don_vi_nhap, han_su_dung) {
+  const don_vi = danh_muc === 'Nguyên liệu pha chế' ? don_vi_tinh : don_vi_nhap;
+
+  const [rows] = await db.execute(
+    `SELECT CAST(ton_kho AS DECIMAL(10,2)) AS ton_kho FROM nguyenlieu WHERE ma_nguyen_lieu = ?`,
+    [ma_nguyen_lieu]
+  );
+
+  if (rows.length === 0) return;
+  const ton_kho = Number(rows[0].ton_kho || 0);
+
+  // Chỉ xử lý nếu ton_kho > 0 và han_su_dung đã qua
+  if (ton_kho <= 0) return;
+
+  // Kiểm tra hạn sử dụng bằng MySQL CURDATE()
+  const [check] = await db.execute(
+    `SELECT ? < CURDATE() AS is_expired`,
+    [han_su_dung]
+  );
+  if (!Number(check[0].is_expired)) return;
+
+  // Ghi vào lịch sử (CHỈ GHI LOG, KHÔNG RESET TỒN)
+  await db.execute(
+    `INSERT INTO lich_su_huy_hang 
+     (ma_nguyen_lieu, ten_nguyen_lieu, han_su_dung, ton_kho_con_lai, don_vi, ngay_xu_ly, ghi_chu) 
+     VALUES (?, ?, ?, ?, ?, CURDATE(), ?)`,
+    [
+      ma_nguyen_lieu,
+      ten_nguyen_lieu,
+      han_su_dung,
+      ton_kho,
+      don_vi,
+      `Phát hiện hết hạn (còn ${ton_kho.toLocaleString('vi-VN')} ${don_vi}). Chờ người dùng xoá thủ công.`
+    ]
+  );
+}
+
+//  HỦY HÀNG  — tổng quát cho mọi nguyên liệu có tồn kho
+//  Cho phép huỷ một phần hoặc toàn bộ, không tự động ẩn nguyên liệu
+//  Bắt buộc phải có lý do huỷ
+async function discardStock(ma_nguyen_lieu, { so_luong = null, ly_do = "" }) {
+  const cleanId = parseInt(ma_nguyen_lieu, 10);
+  if (!Number.isFinite(cleanId)) {
+    throw new Error("Mã nguyên liệu không hợp lệ");
+  }
+
+  // Lấy thông tin nguyên liệu
+  const [rows] = await db.execute(
+    `SELECT ten_nguyen_lieu, danh_muc, don_vi_tinh, don_vi_nhap, 
+            CAST(ton_kho AS DECIMAL(10,2)) AS ton_kho, han_su_dung
+     FROM nguyenlieu WHERE ma_nguyen_lieu = ?`,
+    [cleanId]
+  );
+
+  if (rows.length === 0) {
+    throw new Error("Nguyên liệu không tồn tại");
+  }
+
+  const item = rows[0];
+  const ton_kho_hien_tai = Number(item.ton_kho || 0);
+
+  if (ton_kho_hien_tai <= 0) {
+    throw new Error("Nguyên liệu đã hết tồn kho.");
+  }
+
+  // Xác định số lượng huỷ (null = huỷ toàn bộ)
+  const so_luong_huy = so_luong !== null && so_luong !== undefined
+    ? Number(so_luong)
+    : ton_kho_hien_tai;
+
+  if (so_luong_huy <= 0) {
+    throw new Error("Số lượng huỷ phải lớn hơn 0.");
+  }
+
+  if (so_luong_huy > ton_kho_hien_tai) {
+    throw new Error(`Số lượng huỷ (${so_luong_huy}) vượt quá tồn kho (${ton_kho_hien_tai}).`);
+  }
+
+  // Kiểm tra lý do huỷ
+  if (!ly_do || !ly_do.trim()) {
+    throw new Error("Vui lòng nhập lý do huỷ hàng.");
+  }
+
+  const don_vi = item.danh_muc === 'Nguyên liệu pha chế' ? item.don_vi_tinh : item.don_vi_nhap;
+  const ton_kho_con_lai = ton_kho_hien_tai - so_luong_huy;
+
+  // Ghi log vào lịch sử
+  await db.execute(
+    `INSERT INTO lich_su_huy_hang 
+     (ma_nguyen_lieu, ten_nguyen_lieu, han_su_dung, ton_kho_con_lai, don_vi, ngay_xu_ly, ghi_chu) 
+     VALUES (?, ?, ?, ?, ?, CURDATE(), ?)`,
+    [
+      cleanId,
+      item.ten_nguyen_lieu,
+      item.han_su_dung,
+      so_luong_huy,
+      don_vi,
+      `${ly_do.trim()} (Huỷ ${so_luong_huy.toLocaleString('vi-VN')} ${don_vi}, còn ${ton_kho_con_lai.toLocaleString('vi-VN')} ${don_vi})`
+    ]
+  );
+
+  // Trừ tồn kho
+  await db.execute(
+    `UPDATE nguyenlieu SET ton_kho = ton_kho - ? WHERE ma_nguyen_lieu = ?`,
+    [so_luong_huy, cleanId]
+  );
+
+  // Nếu đã hết tồn kho thì tự động xoá hạn sử dụng 
+  if (ton_kho_con_lai <= 0) {
+    await db.execute(
+      `UPDATE nguyenlieu SET han_su_dung = NULL WHERE ma_nguyen_lieu = ?`,
+      [cleanId]
+    );
+  }
+
+  return {
+    ma_nguyen_lieu: cleanId,
+    so_luong_da_huy: so_luong_huy,
+    ton_kho_con_lai,
+    don_vi,
+  };
+}
+
+module.exports = NguyenLieuRepository;
+
+// Thêm discardStock vào object để service gọi được
+NguyenLieuRepository.discardStock = discardStock;

@@ -1,0 +1,21 @@
+const express = require("express");
+const nhanVienController = require("../controllers/nhanVienController");
+
+const router = express.Router();
+
+router.get("/", nhanVienController.getList);
+router.get("/ca", nhanVienController.getShifts);
+router.get("/lich-phan-cong", nhanVienController.getAssignments);
+router.get("/ky-luong-da-chot", nhanVienController.getKyLuongDaChot);
+router.post("/", nhanVienController.createStaff);
+
+
+router.patch("/:id/status", nhanVienController.toggleStatus);
+
+router.post("/phan-cong", nhanVienController.createAssignment);
+router.delete("/phan-cong", nhanVienController.removeAssignment);
+
+router.put("/:id", nhanVienController.updateStaff);
+router.delete("/:id", nhanVienController.removeStaff);
+
+module.exports = router;

@@ -1,0 +1,748 @@
+import { useEffect, useMemo, useState } from "react";
+import {
+  getBangLuong,
+  getBangCongChiTiet,
+  lockKyLuong,
+  unlockKyLuong,
+  markKyLuongPaid,
+  revertKyLuongPaid,
+} from "../services/payrollService";
+import { exportBangLuongExcel, exportBangLuongPDF } from "../utils/bangLuongExport";
+import ModalPortal from "../components/ModalPortal";
+import ModalOverlay from "../components/ModalOverlay";
+import DieuChinhModal from "../components/DieuChinhModal";
+import { ToastContainer, useToast } from "../components/Toast";
+import { useConfirm } from "../context/ConfirmContext";
+
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+function formatMoney(n) {
+  return `${Number(n || 0).toLocaleString("vi-VN")}đ`;
+}
+
+function formatNumber(n) {
+  return Number(n || 0).toLocaleString("vi-VN");
+}
+
+function toInt(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return 0;
+  return Math.round(v);
+}
+
+function mapRowsFromApi(list) {
+  return (list || []).map((r) => ({
+    ...r,
+    phu_cap: toInt(r.phu_cap),
+    thuong: toInt(r.thuong),
+    khau_tru: toInt(r.khau_tru),
+    tam_ung: toInt(r.tam_ung),
+    so_khoan_thuong: toInt(r.so_khoan_thuong),
+    so_khoan_khau_tru: toInt(r.so_khoan_khau_tru),
+    so_khoan_tam_ung: toInt(r.so_khoan_tam_ung),
+  }));
+}
+
+// Ô Thưởng / Khấu trừ / Tạm ứng: hiển thị tổng + số khoản, bấm để mở modal
+// quản lý từng khoản. Kỳ đã chốt vẫn bấm được nhưng chỉ để xem lịch sử.
+function DieuChinhCell({ value, soKhoan, mau, onOpen, readOnly }) {
+  const coKhoan = soKhoan > 0;
+
+  return (
+    <button
+      type="button"
+      // Chặn nổi bọt: cả dòng đã có onClick mở chi tiết lương
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpen(e);
+      }}
+      className="w-full max-w-[150px] ml-auto flex flex-col items-end gap-0.5 px-2.5 py-1.5 rounded-lg border border-transparent transition-all hover:border-outline hover:bg-primary/5"
+      title={readOnly ? "Xem lịch sử các khoản" : "Bấm để thêm / xóa từng khoản"}
+    >
+      <span className={`font-bold tabular-nums ${coKhoan ? mau : "text-muted"}`}>{formatMoney(value)}</span>
+      <span className="text-[11px] text-muted flex items-center gap-0.5">
+        {coKhoan ? (
+          <>
+            {soKhoan} khoản
+            <span className="material-symbols-outlined text-[13px]">chevron_right</span>
+          </>
+        ) : readOnly ? (
+          "—"
+        ) : (
+          <>
+            <span className="material-symbols-outlined text-[13px]">add</span>
+            Thêm
+          </>
+        )}
+      </span>
+    </button>
+  );
+}
+
+export default function BangLuong() {
+  const { toasts, show: toast, dismiss } = useToast();
+  const { confirm, promptText } = useConfirm();
+  const today = new Date();
+  const [thang, setThang] = useState(today.getMonth() + 1);
+  const [nam, setNam] = useState(today.getFullYear());
+  const [maNhanVien, setMaNhanVien] = useState("");
+
+  const [loading, setLoading] = useState(false);
+  const [ky, setKy] = useState(null);
+  const [totals, setTotals] = useState(null);
+  const [rows, setRows] = useState([]);
+
+  const [actionBusy, setActionBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailRows, setDetailRows] = useState([]);
+  const [detailEmployee, setDetailEmployee] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+
+  // Modal khoản điều chỉnh: { loai, employee }
+  const [dieuChinh, setDieuChinh] = useState(null);
+
+  const kyTrangThai = ky?.trang_thai;
+  const isChuaChot = kyTrangThai === "chua_chot";
+
+  const employeeOptions = useMemo(() => {
+    return rows.map((r) => ({ ma_nhan_vien: r.ma_nhan_vien, ten: r.ten }));
+  }, [rows]);
+
+  const footTotals = useMemo(() => {
+    return rows.reduce(
+      (acc, r) => {
+        acc.tong_ca += Number(r.tong_ca || 0);
+        acc.tong_gio += Number(r.tong_gio || 0);
+        acc.luong_co_ban += Number(r.luong_co_ban || 0);
+        acc.phu_cap += Number(r.phu_cap || 0);
+        acc.thuong += Number(r.thuong || 0);
+        acc.khau_tru += Number(r.khau_tru || 0);
+        acc.tam_ung += Number(r.tam_ung || 0);
+        acc.luong_thuc_nhan += Number(r.luong_thuc_nhan || 0);
+        return acc;
+      },
+      { tong_ca: 0, tong_gio: 0, luong_co_ban: 0, phu_cap: 0, thuong: 0, khau_tru: 0, tam_ung: 0, luong_thuc_nhan: 0 }
+    );
+  }, [rows]);
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await getBangLuong({
+        thang,
+        nam,
+        ma_nhan_vien: maNhanVien ? Number(maNhanVien) : null,
+      });
+      setKy(res.ky);
+      setTotals(res.totals);
+      setRows(mapRowsFromApi(res.rows));
+    } catch (err) {
+      setError(err.response?.data?.message || err.message || "Không tải được bảng lương");
+      setKy(null);
+      setTotals(null);
+      setRows([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [thang, nam, maNhanVien]);
+
+  // Modal trả về row đã tính lại từ server -> chỉ thay đúng dòng đó,
+  // đồng thời cộng lại các thẻ tổng ở đầu trang.
+  const handleRowUpdated = (updated) => {
+    const mapped = mapRowsFromApi([updated])[0];
+    setRows((prev) => prev.map((r) => (r.ma_nhan_vien === mapped.ma_nhan_vien ? { ...r, ...mapped } : r)));
+    setDetailEmployee((prev) =>
+      prev && prev.ma_nhan_vien === mapped.ma_nhan_vien ? { ...prev, ...mapped } : prev
+    );
+  };
+
+  const handleLock = async () => {
+    if (actionBusy) return;
+    const ok = await confirm(
+      `Chốt lương tháng ${pad2(thang)}/${nam}?\n\nSau khi chốt, bảng lương sẽ khóa chỉnh sửa cho đến khi mở chốt`,
+      { confirmLabel: "Chốt lương" }
+    );
+    if (!ok) return;
+    setActionBusy(true);
+    try {
+      await lockKyLuong({ thang, nam });
+      await load();
+      toast("Đã chốt lương");
+    } catch (err) {
+      toast(err.response?.data?.message || err.message || "Không thể chốt lương", "error");
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleUnlock = async () => {
+    if (actionBusy) return;
+    setActionBusy(true);
+    try {
+      await unlockKyLuong({ thang, nam });
+      await load();
+      toast("Đã mở chốt lương");
+    } catch (err) {
+      toast(err.response?.data?.message || err.message || "Không thể mở chốt", "error");
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleMarkPaid = async () => {
+    if (actionBusy) return;
+    const ok = await confirm(
+      `Đánh dấu kỳ lương tháng ${pad2(thang)}/${nam} là ĐÃ THANH TOÁN?\n\nSau bước này kỳ được coi là đã trả lương cho nhân viên.`,
+      { confirmLabel: "Đã thanh toán" }
+    );
+    if (!ok) return;
+    setActionBusy(true);
+    try {
+      await markKyLuongPaid({ thang, nam });
+      await load();
+      toast("Đã đánh dấu thanh toán");
+    } catch (err) {
+      toast(err.response?.data?.message || err.message || "Không thể đánh dấu thanh toán", "error");
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleRevertPaid = async () => {
+    if (actionBusy) return;
+    const ok = await confirm(
+      `Hoàn tác trạng thái đã thanh toán cho kỳ lương tháng ${pad2(thang)}/${nam}?\n\nKỳ sẽ trở về trạng thái "Đã chốt".`,
+      { danger: true, confirmLabel: "Hoàn tác" }
+    );
+    if (!ok) return;
+    const matKhau = await promptText("Nhập mật khẩu admin để xác nhận hoàn tác:", { password: true });
+    if (matKhau === null) return;
+    setActionBusy(true);
+    try {
+      await revertKyLuongPaid({ thang, nam, mat_khau: matKhau });
+      await load();
+      toast("Đã hoàn tác trạng thái thanh toán");
+    } catch (err) {
+      toast(err.response?.data?.message || err.message || "Không thể hoàn tác thanh toán", "error");
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const exportPayload = () => ({
+    rows,
+    totals,
+    thang,
+    nam,
+    kyLabel:
+      kyTrangThai === "chua_chot" ? "Chưa chốt" : kyTrangThai === "da_chot" ? "Đã chốt" : "Đã thanh toán",
+  });
+
+  const handleExportExcel = () => {
+    try {
+      exportBangLuongExcel(exportPayload());
+    } catch (err) {
+      toast(err.message || "Không thể xuất Excel", "error");
+    }
+  };
+
+  const handleExportPDF = async () => {
+    try {
+      await exportBangLuongPDF(exportPayload());
+    } catch (err) {
+      toast(err.message || "Không thể xuất PDF", "error");
+    }
+  };
+
+  const handlePrintPhieuLuong = async () => {
+    if (!detailEmployee) return;
+    try {
+      await exportBangLuongPDF({ rows: [detailEmployee], totals, thang, nam, kyLabel });
+    } catch (err) {
+      toast(err.message || "Không thể in phiếu lương", "error");
+    }
+  };
+
+  const handleViewDetail = async (row) => {
+    setDetailEmployee(row);
+    setDetailOpen(true);
+    setDetailLoading(true);
+    try {
+      const res = await getBangCongChiTiet({
+        thang,
+        nam,
+        ma_nhan_vien: row.ma_nhan_vien,
+      });
+      setDetailRows(res.rows || []);
+    } catch (err) {
+      setDetailRows([]);
+      toast(err.response?.data?.message || err.message || "Không tải được chi tiết", "error");
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const kyLabel =
+    kyTrangThai === "chua_chot" ? "Chưa chốt" : kyTrangThai === "da_chot" ? "Đã chốt" : "Đã thanh toán";
+
+  return (
+    <div className="space-y-5 md:space-y-6 text-on-surface pb-8">
+      <ToastContainer toasts={toasts} onDismiss={dismiss} />
+      <div>
+        <h2 className="text-3xl font-bold text-on-surface">Bảng lương</h2>
+        <p className="text-sm text-muted">Tính lương tháng từ bảng công, thưởng, khấu trừ và tạm ứng</p>
+      </div>
+
+      {/* Filters */}
+      <div className="card p-4 space-y-4">
+        <div className="flex flex-col lg:flex-row gap-4 lg:items-center lg:justify-between">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 min-w-0">
+            <div className="flex items-center gap-2 shrink-0">
+              <label className="text-xs font-semibold text-muted uppercase tracking-wide whitespace-nowrap shrink-0">
+                Tháng
+              </label>
+              <select
+                className="input-field !w-auto !min-w-0 !py-2 !pl-2.5 !pr-1.5 text-sm"
+                value={thang}
+                onChange={(e) => setThang(Number(e.target.value))}
+              >
+                {[...Array(12)].map((_, i) => (
+                  <option key={i + 1} value={i + 1}>
+                    {pad2(i + 1)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <label className="text-xs font-semibold text-muted uppercase tracking-wide whitespace-nowrap shrink-0">
+                Năm
+              </label>
+              <select
+                className="input-field !w-auto !min-w-0 !py-2 !pl-2.5 !pr-1.5 text-sm"
+                value={nam}
+                onChange={(e) => setNam(Number(e.target.value))}
+              >
+                {[today.getFullYear() - 2, today.getFullYear() - 1, today.getFullYear(), today.getFullYear() + 1].map((y) => (
+                  <option key={y} value={y}>
+                    {y}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-center gap-2 min-w-0 max-w-full sm:max-w-[16rem]">
+              <label className="text-xs font-semibold text-muted uppercase tracking-wide whitespace-nowrap shrink-0">
+                Nhân viên
+              </label>
+              <select
+                className="input-field !w-[12rem] sm:!w-[14rem] !min-w-0 !py-2 !pl-2.5 !pr-1.5 text-sm"
+                value={maNhanVien}
+                onChange={(e) => setMaNhanVien(e.target.value)}
+              >
+                <option value="">Tất cả nhân viên</option>
+                {employeeOptions.map((opt) => (
+                  <option key={opt.ma_nhan_vien} value={opt.ma_nhan_vien}>
+                    {opt.ten}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="text-left lg:text-right">
+            <p className="text-xs text-muted uppercase tracking-widest font-semibold">Trạng thái kỳ</p>
+            <p className="text-lg font-bold text-primary tabular-nums mt-1">{kyLabel}</p>
+          </div>
+        </div>
+
+        {/* Actions */}
+        <div className="flex flex-wrap items-center gap-2 justify-between pt-2 border-t border-outline">
+          <div className="flex flex-wrap items-center gap-2">
+            {isChuaChot ? (
+              <>
+                <button
+                  className="btn-outline !py-2 !px-4 !text-sm border-2 border-primary disabled:opacity-50 disabled:cursor-not-allowed"
+                  onClick={handleLock}
+                  disabled={actionBusy}
+                >
+                  <span className="material-symbols-outlined text-lg">lock</span>
+                  Chốt lương
+                </button>
+              </>
+            ) : (
+              <>
+                {/* kyLabel viết hoa đầu vì dùng làm nhãn đứng riêng; ở đây nó nằm giữa câu nên hạ về chữ thường */}
+                <div className="text-sm text-muted">
+                  Dữ liệu đã khóa
+                </div>
+                {kyTrangThai === "da_chot" && (
+                  <>
+                    <button
+                      className="btn-primary !py-2 !px-4 !text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                      onClick={handleMarkPaid}
+                      disabled={actionBusy}
+                    >
+                      <span className="material-symbols-outlined text-lg">payments</span>
+                      Đánh dấu đã thanh toán
+                    </button>
+                    <button
+                      className="btn-ghost !py-2 !px-4 !text-sm border border-outline disabled:opacity-50 disabled:cursor-not-allowed"
+                      onClick={handleUnlock}
+                      disabled={actionBusy}
+                    >
+                      <span className="material-symbols-outlined text-lg">lock_open</span>
+                      Mở chốt
+                    </button>
+                  </>
+                )}
+                {kyTrangThai === "da_thanh_toan" && (
+                  <button
+                    className="btn-outline !py-2 !px-4 !text-sm !border-error/40 !text-error hover:!bg-error/5 disabled:opacity-50 disabled:cursor-not-allowed"
+                    onClick={handleRevertPaid}
+                    disabled={actionBusy}
+                  >
+                    <span className="material-symbols-outlined text-lg">undo</span>
+                    Hoàn tác thanh toán
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Xuất file — luôn ở bên phải cho mọi trạng thái */}
+          <div className="flex flex-wrap items-center gap-2">
+            <button className="btn-outline !py-2 !px-4 !text-sm" onClick={handleExportExcel}>
+              <span className="material-symbols-outlined text-lg">download</span>
+              Xuất Excel
+            </button>
+            <button className="btn-outline !py-2 !px-4 !text-sm" onClick={handleExportPDF}>
+              <span className="material-symbols-outlined text-lg">picture_as_pdf</span>
+              Xuất PDF
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Totals */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="card p-4 relative overflow-hidden">
+          <div className="absolute left-0 top-0 bottom-0 w-[3px] rounded-r-sm" style={{ backgroundColor: "var(--color-primary)" }} />
+          <div className="pl-2">
+            <p className="text-xs font-medium text-muted">Tổng nhân viên</p>
+            <p className="text-lg font-bold text-on-surface tabular-nums mt-0.5">{totals?.tong_nhan_vien || 0}</p>
+          </div>
+        </div>
+        <div className="card p-4 relative overflow-hidden">
+          <div className="absolute left-0 top-0 bottom-0 w-[3px] rounded-r-sm" style={{ backgroundColor: "var(--color-success)" }} />
+          <div className="pl-2">
+            <p className="text-xs font-medium text-muted">Tổng giờ làm</p>
+            <p className="text-lg font-bold text-on-surface tabular-nums mt-0.5">{formatNumber(totals?.tong_gio || 0)}</p>
+          </div>
+        </div>
+        <div className="card p-4 relative overflow-hidden">
+          <div className="absolute left-0 top-0 bottom-0 w-[3px] rounded-r-sm" style={{ backgroundColor: "var(--color-warning)" }} />
+          <div className="pl-2">
+            <p className="text-xs font-medium text-muted">Tổng lương cơ bản</p>
+            <p className="text-lg font-bold text-on-surface tabular-nums mt-0.5">{formatMoney(totals?.tong_luong_co_ban || 0)}</p>
+            <p className="text-[11px] text-muted mt-0.5">Chưa gồm phụ cấp/thưởng/khấu trừ</p>
+          </div>
+        </div>
+        <div className="card p-4 relative overflow-hidden">
+          <div className="absolute left-0 top-0 bottom-0 w-[3px] rounded-r-sm" style={{ backgroundColor: "var(--color-error)" }} />
+          <div className="pl-2">
+            <p className="text-xs font-medium text-muted">Tổng tiền phải trả</p>
+            {/* Lấy từ footTotals để cập nhật ngay khi thêm/xóa khoản, không cần tải lại trang */}
+            <p className="text-lg font-bold text-on-surface tabular-nums mt-0.5">
+              {formatMoney(rows.length ? footTotals.luong_thuc_nhan : totals?.tong_tien_phai_tra || 0)}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="flex justify-center mt-10">
+          <div className="w-12 h-12 border-4 border-primary border-dashed rounded-full animate-spin" />
+        </div>
+      ) : error ? (
+        <div className="alert-error text-error bg-error-container/20 border border-error/20 rounded-xl p-4">{error}</div>
+      ) : (
+        <div className="card overflow-hidden">
+          <div className="overflow-x-auto custom-scrollbar">
+            <table className="w-full text-left text-sm min-w-[1100px]">
+              <thead className="table-head">
+                <tr>
+                  <th className="px-4 py-3">Nhân viên</th>
+                  <th className="px-4 py-3 text-center">Tổng ca</th>
+                  <th className="px-4 py-3 text-center">Tổng giờ</th>
+                  <th className="px-4 py-3 text-center">Lương/giờ</th>
+                  <th className="px-4 py-3 text-center">Lương cơ bản</th>
+                  <th className="px-4 py-3 text-center" title="Lấy từ trang Cấu hình lương nhân viên">
+                    Phụ cấp
+                  </th>
+                  <th className="px-4 py-3 text-center">Thưởng</th>
+                  <th className="px-4 py-3 text-center">Khấu trừ</th>
+                  <th className="px-4 py-3 text-center">Tạm ứng</th>
+                  <th className="px-4 py-3 text-center">Lương thực nhận</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-outline">
+                {rows.length === 0 ? (
+                  <tr>
+                    <td colSpan={10} className="px-4 py-12 text-center text-muted">
+                      Không có dữ liệu cho bộ lọc này.
+                    </td>
+                  </tr>
+                ) : (
+                  rows.map((r) => {
+                    const chuaCauHinhLuong = Number(r.luong_gio || 0) === 0;
+                    return (
+                    <tr
+                      key={r.ma_nhan_vien}
+                      className="transition-colors hover:bg-primary/5 cursor-pointer"
+                      style={chuaCauHinhLuong ? { backgroundColor: "color-mix(in srgb, var(--color-warning) 10%, transparent)" } : undefined}
+                      onClick={() => handleViewDetail(r)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          handleViewDetail(r);
+                        }
+                      }}
+                      tabIndex={0}
+                      role="button"
+                      title="Nhấn để xem chi tiết lương"
+                      aria-label={`Xem chi tiết lương của ${r.ten || ""}`}
+                    >
+                      <td className="px-4 py-3 font-semibold">
+                        <div className="flex items-center gap-1.5">
+                          <span>{r.ten}</span>
+                          {chuaCauHinhLuong && (
+                            <span className="material-symbols-outlined text-warning text-base" title="Chưa cấu hình lương/giờ">warning</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-center text-muted">{r.tong_ca}</td>
+                      <td className="px-4 py-3 text-right font-bold">{Number(r.tong_gio || 0).toLocaleString("vi-VN", { maximumFractionDigits: 2 })}</td>
+                      <td className={`px-4 py-3 text-right font-bold ${chuaCauHinhLuong ? "text-warning" : ""}`}>{formatMoney(r.luong_gio)}</td>
+                      <td className="px-4 py-3 text-right font-bold">{formatMoney(r.luong_co_ban)}</td>
+
+                      <td className="px-4 py-3 text-right font-bold">{formatMoney(r.phu_cap)}</td>
+                      <td className="px-2 py-3 text-right">
+                        <DieuChinhCell
+                          value={r.thuong}
+                          soKhoan={r.so_khoan_thuong}
+                          mau="text-success"
+                          readOnly={!isChuaChot}
+                          onOpen={() => setDieuChinh({ loai: "thuong", employee: r })}
+                        />
+                      </td>
+                      <td className="px-2 py-3 text-right">
+                        <DieuChinhCell
+                          value={r.khau_tru}
+                          soKhoan={r.so_khoan_khau_tru}
+                          mau="text-error"
+                          readOnly={!isChuaChot}
+                          onOpen={() => setDieuChinh({ loai: "khau_tru", employee: r })}
+                        />
+                      </td>
+                      <td className="px-2 py-3 text-right">
+                        <DieuChinhCell
+                          value={r.tam_ung}
+                          soKhoan={r.so_khoan_tam_ung}
+                          mau="text-error"
+                          readOnly={!isChuaChot}
+                          onOpen={() => setDieuChinh({ loai: "tam_ung", employee: r })}
+                        />
+                      </td>
+                      <td
+                        className={`px-4 py-3 text-right font-bold ${
+                          Number(r.luong_thuc_nhan || 0) < 0 ? "text-error" : ""
+                        }`}
+                      >
+                        {formatMoney(r.luong_thuc_nhan)}
+                      </td>
+
+                    </tr>
+                    );
+                  })
+                )}
+              </tbody>
+              {rows.length > 0 && (
+                <tfoot>
+                  <tr className="border-t-2 border-outline bg-primary/5 font-bold">
+                    <td className="px-4 py-3">TỔNG CỘNG</td>
+                    <td className="px-4 py-3 text-center">{footTotals.tong_ca}</td>
+                    <td className="px-4 py-3 text-right">{footTotals.tong_gio.toLocaleString("vi-VN", { maximumFractionDigits: 2 })}</td>
+                    <td className="px-4 py-3"></td>
+                    <td className="px-4 py-3 text-right">{formatMoney(footTotals.luong_co_ban)}</td>
+                    <td className="px-2 py-3 text-right">{formatMoney(footTotals.phu_cap)}</td>
+                    <td className="px-2 py-3 text-right">{formatMoney(footTotals.thuong)}</td>
+                    <td className="px-2 py-3 text-right">{formatMoney(footTotals.khau_tru)}</td>
+                    <td className="px-2 py-3 text-right">{formatMoney(footTotals.tam_ung)}</td>
+                    <td className="px-4 py-3 text-right text-primary">{formatMoney(footTotals.luong_thuc_nhan)}</td>
+                  </tr>
+                </tfoot>
+              )}
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Modal khoản điều chỉnh */}
+      {dieuChinh && (
+        <DieuChinhModal
+          loai={dieuChinh.loai}
+          employee={dieuChinh.employee}
+          thang={thang}
+          nam={nam}
+          readOnly={!isChuaChot}
+          onClose={() => setDieuChinh(null)}
+          onRowUpdated={handleRowUpdated}
+          onError={(msg) => toast(msg, "error")}
+        />
+      )}
+
+      {/* Detail Modal */}
+      {detailOpen && (
+        <ModalPortal>
+          <ModalOverlay className="print:hidden" onClick={() => setDetailOpen(false)}>
+            <div
+              className="modal-panel max-w-5xl w-full max-h-[90vh] flex flex-col min-h-0 overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="shrink-0 p-5 md:p-6 pb-4 border-b border-outline flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <h2 className="text-lg font-bold text-primary">Chi tiết lương - {detailEmployee?.ten || ""}</h2>
+                  <p className="text-muted text-sm mt-1">
+                    {pad2(thang)}/{nam}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    className="btn-outline !py-2 !px-3 !text-xs"
+                    onClick={handlePrintPhieuLuong}
+                    disabled={!detailEmployee}
+                  >
+                    <span className="material-symbols-outlined text-base">print</span>
+                    In phiếu lương
+                  </button>
+                  <button type="button" className="btn-ghost !p-2" onClick={() => setDetailOpen(false)} aria-label="Đóng">
+                    <span className="material-symbols-outlined">close</span>
+                  </button>
+                </div>
+              </div>
+
+              {detailEmployee && (
+                <div className="shrink-0 px-5 md:px-6 py-4 border-b border-outline space-y-3">
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="rounded-xl bg-primary/5 px-3 py-2.5">
+                      <p className="text-[10px] font-semibold uppercase text-muted tracking-wide">Lương/giờ</p>
+                      <p className="text-base font-bold text-primary tabular-nums mt-0.5">{formatMoney(detailEmployee.luong_gio)}</p>
+                    </div>
+                    <div className="rounded-xl bg-primary/5 px-3 py-2.5">
+                      <p className="text-[10px] font-semibold uppercase text-muted tracking-wide">Tổng giờ</p>
+                      <p className="text-base font-bold text-primary tabular-nums mt-0.5">{detailRows.reduce((sum, r) => sum + Number(r.so_gio_quy_doi || 0), 0).toLocaleString("vi-VN", { maximumFractionDigits: 2 })}</p>
+                    </div>
+                    <div className="rounded-xl bg-primary/5 px-3 py-2.5">
+                      <p className="text-[10px] font-semibold uppercase text-muted tracking-wide">Lương cơ bản</p>
+                      <p className="text-base font-bold text-primary tabular-nums mt-0.5">{formatMoney(detailEmployee.luong_co_ban)}</p>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-outline/60 divide-y divide-outline/40 text-sm overflow-hidden">
+                    <div className="flex justify-between px-3 py-2">
+                      <span className="text-muted">Lương cơ bản</span>
+                      <span className="font-semibold tabular-nums">{formatMoney(detailEmployee.luong_co_ban)}</span>
+                    </div>
+                    <div className="flex justify-between px-3 py-2">
+                      <span className="text-muted">+ Phụ cấp</span>
+                      <span className="font-semibold tabular-nums text-success">{formatMoney(detailEmployee.phu_cap)}</span>
+                    </div>
+                    <div className="flex justify-between px-3 py-2">
+                      <span className="text-muted">+ Thưởng</span>
+                      <span className="font-semibold tabular-nums text-success">{formatMoney(detailEmployee.thuong)}</span>
+                    </div>
+                    <div className="flex justify-between px-3 py-2">
+                      <span className="text-muted">− Khấu trừ</span>
+                      <span className="font-semibold tabular-nums text-error">{formatMoney(detailEmployee.khau_tru)}</span>
+                    </div>
+                    <div className="flex justify-between px-3 py-2">
+                      <span className="text-muted">− Tạm ứng</span>
+                      <span className="font-semibold tabular-nums text-error">{formatMoney(detailEmployee.tam_ung)}</span>
+                    </div>
+                    <div className="flex justify-between px-3 py-2.5 bg-primary/5">
+                      <span className="font-bold">Lương thực nhận</span>
+                      <span className="font-bold tabular-nums text-primary">{formatMoney(detailEmployee.luong_thuc_nhan)}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-5 md:p-6 pt-4">
+                {detailLoading ? (
+                  <div className="flex justify-center py-10">
+                    <div className="w-10 h-10 border-4 border-primary border-dashed rounded-full animate-spin" />
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto custom-scrollbar">
+                    <table className="w-full text-left text-sm min-w-[750px]">
+                      <thead className="table-head">
+                        <tr>
+                          <th className="px-4 py-3">Ngày làm việc</th>
+                          <th className="px-4 py-3">Tên ca</th>
+                          <th className="px-4 py-3">Thời gian ca</th>
+                          <th className="px-4 py-3 text-right">Số giờ</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-outline">
+                        {detailRows.length === 0 ? (
+                          <tr>
+                            <td colSpan={4} className="px-4 py-12 text-center text-muted">
+                              Không có dữ liệu.
+                            </td>
+                          </tr>
+                        ) : (
+                          detailRows.map((r, idx) => (
+                            <tr key={`${r.ngay}-${r.ma_ca}-${idx}`} className="hover:bg-primary/5 transition-colors">
+                              <td className="px-4 py-3">
+                                {new Date(r.ngay).toLocaleDateString("vi-VN")}
+                                {Number(r.he_so || 1) > 1 && (
+                                  <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-bold text-warning" style={{ backgroundColor: "color-mix(in srgb, var(--color-warning) 15%, transparent)" }}>
+                                    Lễ ×{Number(r.he_so)}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-4 py-3 font-semibold text-primary">{r.ten_ca}</td>
+                              <td className="px-4 py-3 text-muted">{r.thoi_gian_ca}</td>
+                              <td className="px-4 py-3 text-right font-bold tabular-nums">
+                                {Number(r.so_gio || 0).toLocaleString("vi-VN", { maximumFractionDigits: 2 })}
+                                {Number(r.he_so || 1) > 1 && (
+                                  <span className="block text-[10px] font-medium text-warning">
+                                    ={Number(r.so_gio_quy_doi || 0).toLocaleString("vi-VN", { maximumFractionDigits: 2 })} quy đổi
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          </ModalOverlay>
+        </ModalPortal>
+      )}
+    </div>
+  );
+}
+
