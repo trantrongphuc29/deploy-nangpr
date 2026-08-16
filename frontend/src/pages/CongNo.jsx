@@ -889,9 +889,9 @@ export default function CongNo() {
           )}
         </div>
 
-        {/* Filter: 30% - cột 4-6 */}
-        <div className="col-span-3 flex items-center">
-          {tab === 'import' ? (
+        {/* Filter: 30% - cột 4-6 (chỉ hiện ở tab Phiếu nhập) */}
+        {tab === 'import' && (
+          <div className="col-span-3 flex items-center">
             <div className="flex items-center gap-1 bg-surface-container-high p-0.5 rounded-lg w-full">
               {[
                 { key: "no", label: "Đang nợ" },
@@ -911,19 +911,11 @@ export default function CongNo() {
                 </button>
               ))}
             </div>
-          ) : (
-            <div className="flex items-center gap-2 px-4 py-2 rounded-xl shadow-sm border h-full" style={{ backgroundColor: "color-mix(in srgb, var(--color-success) 8%, transparent)", borderColor: "color-mix(in srgb, var(--color-success) 20%, transparent)" }}>
-              <span className="material-symbols-outlined text-base shrink-0" style={{ color: "var(--color-success)" }}>payments</span>
-              <div className="min-w-0">
-                <p className="text-[9px] font-bold uppercase text-muted tracking-wider">Đã thanh toán</p>
-                <p className="text-sm font-black" style={{ color: "var(--color-success)" }}>{dinhDangTien(paymentsSummary.tong_da_tra)}</p>
-              </div>
-            </div>
-          )}
-        </div>
+          </div>
+        )}
 
-        {/* Thống kê nhanh: 40% - cột 7-10 */}
-        {tab === 'import' ? (
+        {/* Thống kê nhanh: 40% - cột 7-10 (chỉ hiện ở tab Phiếu nhập) */}
+        {tab === 'import' && (
           <>
             <div className="col-span-2">
               <div className="flex items-center gap-2 px-3 py-2 rounded-xl shadow-sm border h-full" style={{ backgroundColor: "color-mix(in srgb, var(--color-amber) 8%, transparent)", borderColor: "color-mix(in srgb, var(--color-amber) 20%, transparent)" }}>
@@ -940,27 +932,6 @@ export default function CongNo() {
                 <div className="min-w-0">
                   <p className="text-[9px] font-bold uppercase text-muted tracking-wider truncate">Nhà cung cấp đang nợ</p>
                   <p className="text-base font-black" style={{ color: "var(--color-purple)" }}>{thongKe.so_ncc_dang_no}</p>
-                </div>
-              </div>
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="col-span-2">
-              <div className="flex items-center gap-2 px-3 py-2 rounded-xl shadow-sm border h-full" style={{ backgroundColor: "color-mix(in srgb, var(--color-info) 8%, transparent)", borderColor: "color-mix(in srgb, var(--color-info) 20%, transparent)" }}>
-                <span className="material-symbols-outlined text-base shrink-0" style={{ color: "var(--color-info)" }}>receipt_long</span>
-                <div className="min-w-0">
-                  <p className="text-[9px] font-bold uppercase text-muted tracking-wider truncate">Số lần thanh toán</p>
-                  <p className="text-base font-black" style={{ color: "var(--color-info)" }}>{paymentsSummary.so_lan_thanh_toan}</p>
-                </div>
-              </div>
-            </div>
-            <div className="col-span-2">
-              <div className="flex items-center gap-2 px-3 py-2 rounded-xl shadow-sm border h-full" style={{ backgroundColor: "color-mix(in srgb, var(--color-success) 8%, transparent)", borderColor: "color-mix(in srgb, var(--color-success) 20%, transparent)" }}>
-                <span className="material-symbols-outlined text-base shrink-0" style={{ color: "var(--color-success)" }}>payments</span>
-                <div className="min-w-0">
-                  <p className="text-[9px] font-bold uppercase text-muted tracking-wider truncate">Tổng đã thanh toán</p>
-                  <p className="text-base font-black" style={{ color: "var(--color-success)" }}>{dinhDangTien(paymentsSummary.tong_da_tra)}</p>
                 </div>
               </div>
             </div>
