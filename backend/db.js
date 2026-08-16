@@ -23,6 +23,9 @@ const pool = mysql.createPool({
 // Code xử lý + INTERVAL 7 HOUR ở Repository dựa trên UTC gốc
 pool.on('connection', (conn) => {
   conn.execute("SET time_zone = '+00:00'");
+  // MySQL 5.7 của project tắt ONLY_FULL_GROUP_BY mặc định; TiDB/MySQL 8 bật sẵn
+  // và làm vỡ các query GROUP BY cũ — bỏ mode này trên mỗi phiên kết nối
+  conn.execute("SET SESSION sql_mode = (SELECT REPLACE(@@sql_mode, 'ONLY_FULL_GROUP_BY', ''))");
 });
 
 // Xuất ra dạng promise để các Repository dùng được await db.execute()

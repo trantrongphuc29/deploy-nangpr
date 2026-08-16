@@ -56,8 +56,8 @@ Mở tab **Environment Variables**, tạo **3 bộ môi trường**: `Production
 
 - Bấm **Deploy** — Vercel sẽ:
   1. `npm install` + `npm run build` trong `frontend/` → output `build/`
-  2. Đóng gói `backend/src/app.js` thành serverless function (kèm `backend/uploads/**`)
-  3. Nạp routes từ `vercel.json`
+  2. Đóng gói `api/index.js` (wrapper trỏ tới `backend/src/app.js`) thành serverless function
+  3. Nạp rewrites từ `vercel.json` (file tĩnh ưu tiên trước, SPA fallback sau)
 - Xong: vào **Deployments** → mở URL `https://<project>.vercel.app`
 
 ## Bước 5 — Kiểm tra

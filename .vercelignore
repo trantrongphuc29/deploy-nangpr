@@ -1,0 +1,12 @@
+# Secrets — không bao giờ đóng gói vào deployment
+.env
+.env.*
+!.env.example
+
+# Không cần upload lên Vercel
+node_modules
+backend/csv_export
+backend/quan_cafe_csv.zip
+backend/uploads
+frontend/build
+.vercel
