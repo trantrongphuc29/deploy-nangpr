@@ -874,11 +874,10 @@ export default function CongNo() {
         />
       </div>
 
-      {/* ── ROW 2: Search (30%) + Filter (30%) + Thống kê nhanh ── */}
       <div className="grid grid-cols-1 sm:grid-cols-10 gap-2">
-        {/* Search: 30% - cột 1-3 */}
-        <div className="col-span-3 relative">
-          <input type="text" placeholder="Tìm kiếm..." value={tuKhoaTimKiem}
+        {/* Search: 30% - cột 1-3 (cùng chiều cao ở cả 2 tab) */}
+        <div className="col-span-3 relative sm:min-h-[56px]">
+          <input type="text" placeholder={tab === 'import' ? "Tìm kiếm phiếu nhập..." : "Tìm kiếm phiếu thanh toán..."} value={tuKhoaTimKiem}
             onChange={(e) => { setTuKhoaTimKiem(e.target.value); }}
             className="w-full border-none rounded-xl pl-3 pr-9 py-2 text-sm transition-all h-full focus:ring-1"
             style={{ backgroundColor: "color-mix(in srgb, var(--color-primary) 8%, transparent)", border: "1px solid color-mix(in srgb, var(--color-primary) 20%, transparent)", color: "var(--color-on-surface)" }} />
