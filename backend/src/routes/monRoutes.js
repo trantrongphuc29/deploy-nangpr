@@ -4,27 +4,13 @@
  * ======================================== */
 const express = require("express");
 const multer = require("multer");
-const path = require("path");
-const fs = require("fs");
 const router = express.Router();
 const MonController = require("../controllers/monController");
 
-const uploadDir = path.join(__dirname, "../../uploads/anh-mon");
-
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `mon-${Date.now()}${ext}`);
-  },
-});
-
+// Dùng memoryStorage: ảnh được giữ trong bộ nhớ rồi upload lên Cloudinary,
+// không ghi ra đĩa (tương thích Vercel serverless - filesystem chỉ đọc).
 const upload = multer({
-  storage: storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
   fileFilter: (req, file, cb) => {
     if (!file.mimetype.startsWith("image/")) {

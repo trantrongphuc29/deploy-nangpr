@@ -4,10 +4,22 @@
 const MonService = require("../services/monService");
 const fs = require("fs");
 const path = require("path");
+const {
+  uploadImageBuffer,
+  isCloudinaryUrl,
+  deleteCloudinaryImage,
+} = require("../utils/cloudinaryImage");
 
-/** Xóa file ảnh khỏi đĩa nếu là file cục bộ */
-const deleteImageFile = (hinhAnh) => {
+/** Xóa ảnh cũ: file cục bộ thì xóa khỏi đĩa, URL Cloudinary thì xóa trên cloud */
+const deleteImageFile = async (hinhAnh) => {
   if (!hinhAnh || typeof hinhAnh !== "string") return;
+
+  // Xóa ảnh trên Cloudinary
+  if (isCloudinaryUrl(hinhAnh)) {
+    await deleteCloudinaryImage(hinhAnh);
+    return;
+  }
+
   // Chỉ xóa nếu là đường dẫn file local (không xóa base64 hay URL ngoài)
   if (hinhAnh.startsWith("/uploads/")) {
     // Strip leading / để path.join hoạt động đúng trên Windows (tránh resolve từ drive root)
@@ -48,7 +60,8 @@ const MonController = {
       const body = { ...req.body };
 
       if (req.file) {
-        body.hinh_anh = `/uploads/anh-mon/${req.file.filename}`;
+        // Upload ảnh lên Cloudinary, lưu secure_url vào DB
+        body.hinh_anh = await uploadImageBuffer(req.file.buffer, req.file.originalname);
       } else {
         body.hinh_anh = null;
       }
@@ -73,11 +86,12 @@ const MonController = {
       const currentMon = await MonService.getMonById(ma_mon);
 
       if (req.file) {
-        body.hinh_anh = `/uploads/anh-mon/${req.file.filename}`;
+        // Upload ảnh mới lên Cloudinary
+        body.hinh_anh = await uploadImageBuffer(req.file.buffer, req.file.originalname);
 
-        // Xóa ảnh cũ nếu có upload ảnh mới
+        // Xóa ảnh cũ (local hoặc Cloudinary) nếu có upload ảnh mới
         if (currentMon && currentMon.hinh_anh) {
-          deleteImageFile(currentMon.hinh_anh);
+          await deleteImageFile(currentMon.hinh_anh);
         }
       } else {
         const oldImage = req.body.hinh_anh_cu || req.body.hinh_anh || null;
@@ -103,9 +117,9 @@ const MonController = {
 
       await MonService.xoaMon(ma_mon);
 
-      // Xóa file ảnh khỏi đĩa
+      // Xóa ảnh (file local hoặc Cloudinary)
       if (mon && mon.hinh_anh) {
-        deleteImageFile(mon.hinh_anh);
+        await deleteImageFile(mon.hinh_anh);
       }
 
       res.json({

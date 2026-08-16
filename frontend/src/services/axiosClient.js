@@ -1,7 +1,8 @@
 import axios from "axios";
+import { API_BASE_URL } from "../utils/shared";
 
 const axiosClient = axios.create({
-  baseURL: "http://localhost:3001",
+  baseURL: API_BASE_URL,
 });
 
 /** Tự động set Content-Type dựa trên dữ liệu gửi đi */

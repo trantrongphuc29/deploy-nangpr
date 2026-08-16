@@ -1,15 +1,22 @@
 const mysql = require("mysql2");
 
 // Sử dụng createPool thay vì createConnection
+// Cấu hình đọc từ biến môi trường (DB_HOST, DB_USER, ...) để deploy lên
+// Vercel / kết nối TiDB Cloud. Giữ giá trị localhost mặc định khi chạy local.
 const pool = mysql.createPool({
-    host: "localhost",
-    user: "root",
-    password: "",
-    database: "quan_cafe",
+    host: process.env.DB_HOST || "localhost",
+    port: process.env.DB_PORT ? Number(process.env.DB_PORT) : 3306,
+    user: process.env.DB_USER || "root",
+    password: process.env.DB_PASSWORD || "",
+    database: process.env.DB_NAME || "quan_cafe",
     timezone: '+00:00',
     waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
+    // 5 thay vì 10: nhiều instance serverless (Vercel) cùng mở pool dễ vượt
+    // giới hạn kết nối của TiDB Cloud serverless nếu để cao
+    connectionLimit: 5,
+    queueLimit: 0,
+    // TiDB Cloud yêu cầu TLS: đặt DB_SSL=true trong biến môi trường
+    ...(process.env.DB_SSL === "true" ? { ssl: { rejectUnauthorized: false } } : {})
 });
 
 // Đảm bảo múi giờ MySQL = UTC để NOW(), CURDATE() trả về giờ UTC

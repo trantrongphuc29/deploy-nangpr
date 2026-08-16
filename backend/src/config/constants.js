@@ -1,5 +1,5 @@
-const PORT = 3001;
-const SECRET_KEY = "SECRET_KEY";
+const PORT = process.env.PORT || 3001;
+const SECRET_KEY = process.env.SECRET_KEY || "SECRET_KEY";
 
 module.exports = {
   PORT,

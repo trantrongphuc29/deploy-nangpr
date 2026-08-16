@@ -1,3 +1,6 @@
+// Load biến môi trường từ backend/.env (nếu có) — trên Vercel env do dashboard cung cấp
+require("dotenv").config({ quiet: true });
+
 const express = require("express");
 const cors = require("cors");
 const authRoutes = require("./routes/authRoutes");
