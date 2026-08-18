@@ -17,11 +17,6 @@ async function ensureKyLuong({ thang, nam }) {
   return rows[0];
 }
 
-// ===== Cờ "dữ liệu đã thay đổi" (dirty flag) =====
-// Mục đích: tránh tính lại toàn bộ bảng công / bảng lương ở MỖI lần GET.
-// Bất kỳ mutation nào ảnh hưởng tới bảng công / bảng lương (phancong, ngay_le,
-// bang_luong_dieu_chinh, nhanvien_luong) đều phải đánh dấu dirty tại đây;
-// GET chỉ recalc khi cờ dirty được set (hoặc bảng chưa từng được tính).
 async function markDirtyCong({ thang, nam }) {
   await db.execute(
     `UPDATE ky_luong SET dirty_cong_at = NOW() WHERE thang = ? AND nam = ?`,
@@ -511,6 +506,7 @@ async function getBangLuongRow({ ky_luong_id, ma_nhan_vien }) {
         nv.ten,
         bl.tong_ca,
         bl.tong_gio,
+        COALESCE(bc.tong_gio_quy_doi, bl.tong_gio, 0) AS tong_gio_quy_doi,
         bl.luong_gio,
         bl.luong_co_ban,
         bl.phu_cap,
@@ -521,6 +517,8 @@ async function getBangLuongRow({ ky_luong_id, ma_nhan_vien }) {
         ${SO_KHOAN_SELECT}
       FROM bang_luong_thang bl
       JOIN nhanvien nv ON nv.ma_nhan_vien = bl.ma_nhan_vien
+      LEFT JOIN bang_cong_thang bc
+        ON bc.ky_luong_id = bl.ky_luong_id AND bc.ma_nhan_vien = bl.ma_nhan_vien
       WHERE bl.ky_luong_id = ? AND bl.ma_nhan_vien = ?
     `,
     [ky_luong_id, ma_nhan_vien]
