@@ -50,7 +50,7 @@ const CongNoRepository = {
     );
     const total = Number(countRows[0].cnt);
 
-    // Lấy danh sách (không còn subquery JSON_ARRAYAGG theo từng dòng — N+1)
+    // Lấy danh sách
     const [rows] = await db.execute(
       `SELECT 
         pn.ma_phieu,
@@ -61,7 +61,17 @@ const CongNoRepository = {
         pn.da_thanh_toan,
         pn.ngay_thanh_toan,
         pn.so_tien_da_tra,
-        (pn.tong_tien - pn.so_tien_da_tra) AS con_no
+        (pn.tong_tien - pn.so_tien_da_tra) AS con_no,
+        (SELECT JSON_ARRAYAGG(
+          JSON_OBJECT(
+            'ten_nguyen_lieu', nl.ten_nguyen_lieu,
+            'so_luong', ct.so_luong_nhap,
+            'gia_nhap', ct.gia_nhap,
+            'don_vi_nhap', nl.don_vi_nhap
+          )
+        ) FROM chitiet_phieunhap ct
+        LEFT JOIN nguyenlieu nl ON ct.ma_nguyen_lieu = nl.ma_nguyen_lieu
+        WHERE ct.ma_phieu = pn.ma_phieu) AS chi_tiet_hang
       FROM phieunhap pn
       ${where}
       ORDER BY pn.ngay_nhap DESC
@@ -69,50 +79,12 @@ const CongNoRepository = {
       params
     );
 
-    // Lấy chi tiết hàng của cả trang bằng 1 query batch, gom lại trong JS
-    if (rows.length > 0) {
-      const ids = rows.map(r => r.ma_phieu);
-      const placeholders = ids.map(() => '?').join(',');
-      const [itemRows] = await db.execute(
-        `SELECT ct.ma_phieu, ct.so_luong_nhap, ct.gia_nhap,
-                nl.ten_nguyen_lieu, nl.don_vi_nhap
-         FROM chitiet_phieunhap ct
-         LEFT JOIN nguyenlieu nl ON ct.ma_nguyen_lieu = nl.ma_nguyen_lieu
-         WHERE ct.ma_phieu IN (${placeholders})
-         ORDER BY ct.ma_phieu, ct.ma_chi_tiet`,
-        ids
-      );
-      const itemMap = {};
-      itemRows.forEach(i => {
-        if (!itemMap[i.ma_phieu]) itemMap[i.ma_phieu] = [];
-        itemMap[i.ma_phieu].push({
-          ten_nguyen_lieu: i.ten_nguyen_lieu,
-          so_luong: i.so_luong_nhap,
-          gia_nhap: i.gia_nhap,
-          don_vi_nhap: i.don_vi_nhap,
-        });
-      });
-      rows.forEach(r => { r.chi_tiet_hang = itemMap[r.ma_phieu] || []; });
-    }
-
     return { rows, total };
   },
 
-  /** Lấy thống kê công nợ (5 query độc lập → chạy song song) */
+  /** Lấy thống kê công nợ */
   getStats: async ({ from_date, to_date } = {}) => {
-    // Đã thanh toán trong kỳ (theo from_date/to_date)
-    let daTraParams = [];
-    let daTraWhere = '';
-    if (from_date) {
-      daTraWhere += ' AND DATE(ngay_thanh_toan + INTERVAL 7 HOUR) >= ?';
-      daTraParams.push(from_date);
-    }
-    if (to_date) {
-      daTraWhere += ' AND DATE(ngay_thanh_toan + INTERVAL 7 HOUR) <= ?';
-      daTraParams.push(to_date);
-    }
-
-    // Tổng công nợ theo kỳ (theo from_date/to_date)
+    // Điều kiện lọc theo kỳ (dựa trên ngày nhập phiếu) — dùng chung cho các chỉ số theo kỳ
     let kyParams = [];
     let kyWhere = '';
     if (from_date) {
@@ -124,52 +96,67 @@ const CongNoRepository = {
       kyParams.push(to_date);
     }
 
-    const [
-      [tongNo],
-      [daTraThang],
-      [chiThang],
-      [nccNo],
-      [kyNo],
-    ] = await Promise.all([
-      // Tổng công nợ chưa thanh toán
-      db.execute(
-        `SELECT COALESCE(SUM(pn.tong_tien - pn.so_tien_da_tra), 0) AS tong_con_no,
-                COUNT(*) AS so_phieu_no
-         FROM phieunhap pn
-         WHERE pn.da_thanh_toan = 0 OR pn.tong_tien > pn.so_tien_da_tra`
-      ),
-      // Đã thanh toán trong kỳ
-      db.execute(
-        `SELECT COALESCE(SUM(so_tien), 0) AS da_tra
-         FROM lich_su_thanh_toan
-         WHERE 1=1 ${daTraWhere}`,
-        daTraParams
-      ),
-      // Chi phí nhập trong tháng (tổng tiền nhập) — theo giờ VN
-      db.execute(
-        `SELECT COALESCE(SUM(pn.tong_tien), 0) AS chi
-         FROM phieunhap pn
-         WHERE MONTH(pn.ngay_nhap + INTERVAL 7 HOUR) = MONTH(NOW() + INTERVAL 7 HOUR) 
-           AND YEAR(pn.ngay_nhap + INTERVAL 7 HOUR) = YEAR(NOW() + INTERVAL 7 HOUR)`
-      ),
-      // Số nhà cung cấp đang có công nợ
-      db.execute(
-        `SELECT COUNT(DISTINCT pn.nha_cung_cap) AS so_ncc
-         FROM phieunhap pn
-         WHERE pn.da_thanh_toan = 0 OR pn.tong_tien > pn.so_tien_da_tra`
-      ),
-      // Tổng công nợ theo kỳ
-      db.execute(
-        `SELECT COALESCE(SUM(pn.tong_tien - pn.so_tien_da_tra), 0) AS tong_con_no_ky
-         FROM phieunhap pn
-         WHERE (pn.da_thanh_toan = 0 OR pn.tong_tien > pn.so_tien_da_tra) ${kyWhere}`,
-        kyParams
-      ),
-    ]);
+    // Tổng công nợ chưa thanh toán (toàn bộ thời gian)
+    const [tongNo] = await db.execute(
+      `SELECT COALESCE(SUM(pn.tong_tien - pn.so_tien_da_tra), 0) AS tong_con_no
+       FROM phieunhap pn
+       WHERE pn.da_thanh_toan = 0 OR pn.tong_tien > pn.so_tien_da_tra`
+    );
+
+    // Số phiếu chưa thanh toán trong kỳ đã chọn
+    const [phieuNo] = await db.execute(
+      `SELECT COUNT(*) AS so_phieu_no
+       FROM phieunhap pn
+       WHERE (pn.da_thanh_toan = 0 OR pn.tong_tien > pn.so_tien_da_tra) ${kyWhere}`,
+      kyParams
+    );
+
+    // Đã thanh toán trong kỳ (theo from_date/to_date)
+    // Sử dụng bảng lich_su_thanh_toan để lấy đúng số tiền đã trả
+    let daTraParams = [];
+    let daTraWhere = '';
+    if (from_date) {
+      daTraWhere += ' AND DATE(ngay_thanh_toan + INTERVAL 7 HOUR) >= ?';
+      daTraParams.push(from_date);
+    }
+    if (to_date) {
+      daTraWhere += ' AND DATE(ngay_thanh_toan + INTERVAL 7 HOUR) <= ?';
+      daTraParams.push(to_date);
+    }
+    const [daTraThang] = await db.execute(
+      `SELECT COALESCE(SUM(so_tien), 0) AS da_tra
+       FROM lich_su_thanh_toan
+       WHERE 1=1 ${daTraWhere}`,
+      daTraParams
+    );
+
+    // Chi phí nhập trong tháng (tổng tiền nhập) — theo giờ VN
+    const [chiThang] = await db.execute(
+      `SELECT COALESCE(SUM(pn.tong_tien), 0) AS chi
+       FROM phieunhap pn
+       WHERE MONTH(pn.ngay_nhap + INTERVAL 7 HOUR) = MONTH(NOW() + INTERVAL 7 HOUR) 
+         AND YEAR(pn.ngay_nhap + INTERVAL 7 HOUR) = YEAR(NOW() + INTERVAL 7 HOUR)`
+    );
+
+    // Số nhà cung cấp đang có công nợ trong kỳ đã chọn
+    const [nccNo] = await db.execute(
+      `SELECT COUNT(DISTINCT pn.nha_cung_cap) AS so_ncc
+       FROM phieunhap pn
+       WHERE (pn.da_thanh_toan = 0 OR pn.tong_tien > pn.so_tien_da_tra) ${kyWhere}`,
+      kyParams
+    );
+
+    // Tổng công nợ theo kỳ (theo from_date/to_date)
+    const [kyNo] = await db.execute(
+      `SELECT COALESCE(SUM(pn.tong_tien - pn.so_tien_da_tra), 0) AS tong_con_no_ky
+       FROM phieunhap pn
+       WHERE (pn.da_thanh_toan = 0 OR pn.tong_tien > pn.so_tien_da_tra) ${kyWhere}`,
+      kyParams
+    );
 
     return {
       tong_con_no: Number(tongNo[0].tong_con_no),
-      so_phieu_no: Number(tongNo[0].so_phieu_no),
+      so_phieu_no: Number(phieuNo[0].so_phieu_no),
       da_tra_trong_thang: Number(daTraThang[0].da_tra),
       chi_trong_thang: Number(chiThang[0].chi),
       so_ncc_dang_no: Number(nccNo[0].so_ncc),
@@ -291,24 +278,30 @@ const CongNoRepository = {
 
     const where = whereParts.length ? 'WHERE ' + whereParts.join(' AND ') : '';
 
-    // Đếm + danh sách + thống kê chạy song song (độc lập nhau)
-    const [[countRows], [rows], [sumRows]] = await Promise.all([
-      db.execute(`SELECT COUNT(*) AS cnt FROM lich_su_thanh_toan ${where}`, params),
-      db.execute(
-        `SELECT id, ma_phieu, nha_cung_cap, so_tien, con_no_sau_khi_tra, ngay_thanh_toan, ghi_chu
-         FROM lich_su_thanh_toan
-         ${where}
-         ORDER BY ngay_thanh_toan DESC
-         LIMIT ${toSafeInt(limit, 50)} OFFSET ${toSafeInt(offset, 0)}`,
-        params
-      ),
-      db.execute(
-        `SELECT COALESCE(SUM(so_tien), 0) AS tong_da_tra, COUNT(*) AS so_lan_thanh_toan FROM lich_su_thanh_toan ${where}`,
-        params
-      ),
-    ]);
+    // Đếm
+    const [countRows] = await db.execute(
+      `SELECT COUNT(*) AS cnt FROM lich_su_thanh_toan ${where}`,
+      params
+    );
+    const total = Number(countRows[0].cnt);
 
-    return { rows, total: Number(countRows[0].cnt), tong_da_tra: Number(sumRows[0].tong_da_tra), so_lan_thanh_toan: Number(sumRows[0].so_lan_thanh_toan) };
+    // Lấy danh sách
+    const [rows] = await db.execute(
+      `SELECT id, ma_phieu, nha_cung_cap, so_tien, con_no_sau_khi_tra, ngay_thanh_toan, ghi_chu
+       FROM lich_su_thanh_toan
+       ${where}
+       ORDER BY ngay_thanh_toan DESC
+       LIMIT ${toSafeInt(limit, 50)} OFFSET ${toSafeInt(offset, 0)}`,
+      params
+    );
+
+    // Thống kê
+    const [sumRows] = await db.execute(
+      `SELECT COALESCE(SUM(so_tien), 0) AS tong_da_tra, COUNT(*) AS so_lan_thanh_toan FROM lich_su_thanh_toan ${where}`,
+      params
+    );
+
+    return { rows, total, tong_da_tra: Number(sumRows[0].tong_da_tra), so_lan_thanh_toan: Number(sumRows[0].so_lan_thanh_toan) };
   },
 };
 
